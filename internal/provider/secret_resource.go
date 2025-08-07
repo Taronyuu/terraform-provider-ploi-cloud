@@ -83,13 +83,24 @@ func (r *SecretResource) Create(ctx context.Context, req resource.CreateRequest,
 
 	secret := r.toAPIModel(&data)
 
+	// Try to create the secret first
 	created, err := r.client.CreateSecret(secret)
 	if err != nil {
-		resp.Diagnostics.AddError("Client Error", fmt.Sprintf("Unable to create secret, got error: %s", err))
-		return
+		// If creation failed due to existing secret, try to update it instead
+		if strings.Contains(err.Error(), "already exists") {
+			updated, updateErr := r.client.UpdateSecret(data.ApplicationID.ValueInt64(), data.Key.ValueString(), secret)
+			if updateErr != nil {
+				resp.Diagnostics.AddError("Client Error", fmt.Sprintf("Unable to create or update secret, create error: %s, update error: %s", err, updateErr))
+				return
+			}
+			r.fromAPIModel(updated, &data)
+		} else {
+			resp.Diagnostics.AddError("Client Error", fmt.Sprintf("Unable to create secret, got error: %s", err))
+			return
+		}
+	} else {
+		r.fromAPIModel(created, &data)
 	}
-
-	r.fromAPIModel(created, &data)
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 }
@@ -182,7 +193,16 @@ func (r *SecretResource) toAPIModel(data *SecretResourceModel) *client.Applicati
 }
 
 func (r *SecretResource) fromAPIModel(secret *client.ApplicationSecret, data *SecretResourceModel) {
-	data.ApplicationID = types.Int64Value(secret.ApplicationID)
+	// Only update ApplicationID if it's not zero, otherwise preserve the planned value
+	if secret.ApplicationID != 0 {
+		data.ApplicationID = types.Int64Value(secret.ApplicationID)
+	}
+	
 	data.Key = types.StringValue(secret.Key)
-	data.Value = types.StringValue(secret.Value)
+	
+	// Don't update the value if API returns masked value "********"
+	// The API masks secret values for security, so preserve the original planned value
+	if secret.Value != "" && secret.Value != "********" {
+		data.Value = types.StringValue(secret.Value)
+	}
 }

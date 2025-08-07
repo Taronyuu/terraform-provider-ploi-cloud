@@ -92,14 +92,31 @@ resource "ploicloud_worker" "queue" {
 
 ## 📚 Resources
 
-| Resource | Description |
-|----------|-------------|
-| `ploicloud_application` | Applications (Laravel, WordPress, etc.) |
-| `ploicloud_service` | Databases, caches, message queues |
-| `ploicloud_domain` | Custom domains with SSL |
-| `ploicloud_secret` | Environment variables |
-| `ploicloud_volume` | Persistent storage |
-| `ploicloud_worker` | Background job workers |
+| Resource | Description | Recent Enhancements |
+|----------|-------------|-------------------|
+| `ploicloud_application` | Applications (Laravel, WordPress, etc.) | ✨ `start_command` - Custom start commands |
+| `ploicloud_service` | Databases, caches, message queues | ✨ `storage_size`, `extensions` (PostgreSQL) |
+| `ploicloud_domain` | Custom domains with SSL | |
+| `ploicloud_secret` | Environment variables | |
+| `ploicloud_volume` | Persistent storage | ✨ `storage_class` - Storage class specification |
+| `ploicloud_worker` | Background job workers | ✨ `type`, `memory_request`, `cpu_request` |
+
+### 🆕 New in v1.1.0
+
+**Enhanced Application Resources:**
+- `start_command` - Override default application start commands for custom setups
+
+**Enhanced Service Resources:**
+- `storage_size` - Configure storage allocation for databases and caches (e.g., "10Gi", "500Mi")
+- `extensions` - PostgreSQL extensions support (uuid-ossp, pgcrypto, citext, etc.)
+
+**Enhanced Worker Resources:**
+- `type` - Worker type specification (queue, scheduler, custom)
+- `memory_request` - Memory allocation for workers (e.g., "512Mi", "1Gi")
+- `cpu_request` - CPU allocation for workers (e.g., "250m", "1")
+
+**Enhanced Volume Resources:**
+- `storage_class` - Storage class for volumes (fast-ssd, standard, etc.)
 
 ## 🧑‍💻 Development
 

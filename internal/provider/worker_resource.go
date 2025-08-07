@@ -10,6 +10,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64default"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringdefault"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/ploi/terraform-provider-ploicloud/internal/client"
 )
@@ -30,7 +31,10 @@ type WorkerResourceModel struct {
 	ApplicationID types.Int64  `tfsdk:"application_id"`
 	Name          types.String `tfsdk:"name"`
 	Command       types.String `tfsdk:"command"`
+	Type          types.String `tfsdk:"type"`
 	Replicas      types.Int64  `tfsdk:"replicas"`
+	MemoryRequest types.String `tfsdk:"memory_request"`
+	CPURequest    types.String `tfsdk:"cpu_request"`
 	Status        types.String `tfsdk:"status"`
 }
 
@@ -59,11 +63,27 @@ func (r *WorkerResource) Schema(ctx context.Context, req resource.SchemaRequest,
 				Required:            true,
 				MarkdownDescription: "Command to run for this worker (e.g., php artisan queue:work)",
 			},
+			"type": schema.StringAttribute{
+				Optional:            true,
+				Computed:            true,
+				Default:             stringdefault.StaticString("queue"),
+				MarkdownDescription: "Worker type (defaults to 'queue')",
+			},
 			"replicas": schema.Int64Attribute{
 				Optional:            true,
 				Computed:            true,
 				Default:             int64default.StaticInt64(1),
 				MarkdownDescription: "Number of worker replicas",
+			},
+			"memory_request": schema.StringAttribute{
+				Optional:            true,
+				Computed:            true,
+				MarkdownDescription: "Memory request for the worker (e.g., '256Mi', '1Gi')",
+			},
+			"cpu_request": schema.StringAttribute{
+				Optional:            true,
+				Computed:            true,
+				MarkdownDescription: "CPU request for the worker (e.g., '250m', '1')",
 			},
 			"status": schema.StringAttribute{
 				Computed:            true,
@@ -205,6 +225,18 @@ func (r *WorkerResource) toAPIModel(data *WorkerResourceModel) *client.Worker {
 	if !data.ID.IsNull() {
 		worker.ID = data.ID.ValueInt64()
 	}
+	
+	if !data.Type.IsNull() && data.Type.ValueString() != "" {
+		worker.Type = data.Type.ValueString()
+	}
+	
+	if !data.MemoryRequest.IsNull() && data.MemoryRequest.ValueString() != "" {
+		worker.MemoryRequest = data.MemoryRequest.ValueString()
+	}
+	
+	if !data.CPURequest.IsNull() && data.CPURequest.ValueString() != "" {
+		worker.CPURequest = data.CPURequest.ValueString()
+	}
 
 	return worker
 }
@@ -214,6 +246,9 @@ func (r *WorkerResource) fromAPIModel(worker *client.Worker, data *WorkerResourc
 	data.ApplicationID = types.Int64Value(worker.ApplicationID)
 	data.Name = types.StringValue(worker.Name)
 	data.Command = types.StringValue(worker.Command)
+	data.Type = types.StringValue(worker.Type)
 	data.Replicas = types.Int64Value(worker.Replicas)
+	data.MemoryRequest = types.StringValue(worker.MemoryRequest)
+	data.CPURequest = types.StringValue(worker.CPURequest)
 	data.Status = types.StringValue(worker.Status)
 }

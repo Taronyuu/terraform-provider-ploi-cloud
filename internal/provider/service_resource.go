@@ -29,9 +29,15 @@ type ServiceResource struct {
 type ServiceResourceModel struct {
 	ID            types.Int64  `tfsdk:"id"`
 	ApplicationID types.Int64  `tfsdk:"application_id"`
+	Name          types.String `tfsdk:"service_name"`
 	Type          types.String `tfsdk:"type"`
 	Version       types.String `tfsdk:"version"`
 	Settings      types.Map    `tfsdk:"settings"`
+	Replicas      types.Int64  `tfsdk:"replicas"`
+	CPURequest    types.String `tfsdk:"cpu_request"`
+	MemoryRequest types.String `tfsdk:"memory_request"`
+	StorageSize   types.String `tfsdk:"storage_size"`
+	Extensions    types.List   `tfsdk:"extensions"`
 	Status        types.String `tfsdk:"status"`
 }
 
@@ -52,6 +58,11 @@ func (r *ServiceResource) Schema(ctx context.Context, req resource.SchemaRequest
 				Required:            true,
 				MarkdownDescription: "Application ID this service belongs to",
 			},
+			"service_name": schema.StringAttribute{
+				Optional:            true,
+				Computed:            true,
+				MarkdownDescription: "Service name (auto-generated if not provided)",
+			},
 			"type": schema.StringAttribute{
 				Required:            true,
 				MarkdownDescription: "Service type (mysql, postgresql, redis, valkey, rabbitmq, mongodb, minio, sftp)",
@@ -65,8 +76,34 @@ func (r *ServiceResource) Schema(ctx context.Context, req resource.SchemaRequest
 			},
 			"settings": schema.MapAttribute{
 				Optional:            true,
+				Computed:            true,
 				ElementType:         types.StringType,
-				MarkdownDescription: "Service-specific settings (e.g., database name, storage size)",
+				MarkdownDescription: "Service-specific settings (can be configured, auto-generated values will be preserved)",
+			},
+			"replicas": schema.Int64Attribute{
+				Optional:            true,
+				Computed:            true,
+				MarkdownDescription: "Number of replicas for the service (applicable to worker-type services)",
+			},
+			"cpu_request": schema.StringAttribute{
+				Optional:            true,
+				Computed:            true,
+				MarkdownDescription: "CPU request for the service (e.g., '250m', '1')",
+			},
+			"memory_request": schema.StringAttribute{
+				Optional:            true,
+				Computed:            true,
+				MarkdownDescription: "Memory request for the service (e.g., '256Mi', '1Gi')",
+			},
+			"storage_size": schema.StringAttribute{
+				Optional:            true,
+				Computed:            true,
+				MarkdownDescription: "Storage size for the service (e.g., '1Gi', '10Gi')",
+			},
+			"extensions": schema.ListAttribute{
+				Optional:            true,
+				ElementType:         types.StringType,
+				MarkdownDescription: "Extensions for PostgreSQL services (e.g., ['uuid-ossp', 'pgcrypto'])",
 			},
 			"status": schema.StringAttribute{
 				Computed:            true,
@@ -109,6 +146,8 @@ func (r *ServiceResource) Create(ctx context.Context, req resource.CreateRequest
 		return
 	}
 
+	// Ensure ApplicationID is preserved from the request
+	created.ApplicationID = service.ApplicationID
 	r.fromAPIModel(created, &data)
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
@@ -140,20 +179,33 @@ func (r *ServiceResource) Read(ctx context.Context, req resource.ReadRequest, re
 
 func (r *ServiceResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
 	var data ServiceResourceModel
+	var state ServiceResourceModel
 
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &data)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
 
-	service := r.toAPIModel(&data)
+	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
 
+	// Copy IDs from state to the plan data
+	data.ID = state.ID
+	data.ApplicationID = state.ApplicationID
+
+	// Convert to API model and update
+	service := r.toAPIModel(&data)
+	
 	updated, err := r.client.UpdateService(data.ApplicationID.ValueInt64(), data.ID.ValueInt64(), service)
 	if err != nil {
 		resp.Diagnostics.AddError("Client Error", fmt.Sprintf("Unable to update service, got error: %s", err))
 		return
 	}
 
+	// Ensure ApplicationID is preserved from the request
+	updated.ApplicationID = service.ApplicationID
 	r.fromAPIModel(updated, &data)
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
@@ -208,10 +260,39 @@ func (r *ServiceResource) toAPIModel(data *ServiceResourceModel) *client.Applica
 		service.ID = data.ID.ValueInt64()
 	}
 
+	if !data.Name.IsNull() && data.Name.ValueString() != "" {
+		service.Name = data.Name.ValueString()
+	}
+
+	// Include settings if provided in configuration
 	if !data.Settings.IsNull() {
-		settings := make(map[string]string)
-		data.Settings.ElementsAs(context.Background(), &settings, false)
-		service.Settings = settings
+		settingsMap := make(map[string]string)
+		data.Settings.ElementsAs(context.Background(), &settingsMap, false)
+		service.Settings = client.FlexibleSettingsFromMap(settingsMap)
+	}
+
+	// Include resource configuration if provided
+	if !data.Replicas.IsNull() {
+		service.Replicas = data.Replicas.ValueInt64()
+	}
+	
+	if !data.CPURequest.IsNull() && data.CPURequest.ValueString() != "" {
+		service.CPURequest = data.CPURequest.ValueString()
+	}
+	
+	if !data.MemoryRequest.IsNull() && data.MemoryRequest.ValueString() != "" {
+		service.MemoryRequest = data.MemoryRequest.ValueString()
+	}
+	
+	if !data.StorageSize.IsNull() && data.StorageSize.ValueString() != "" {
+		service.StorageSize = data.StorageSize.ValueString()
+	}
+	
+	// Handle extensions list for PostgreSQL services
+	if !data.Extensions.IsNull() {
+		var extensions []string
+		data.Extensions.ElementsAs(context.Background(), &extensions, false)
+		service.Extensions = extensions
 	}
 
 	return service
@@ -220,13 +301,36 @@ func (r *ServiceResource) toAPIModel(data *ServiceResourceModel) *client.Applica
 func (r *ServiceResource) fromAPIModel(service *client.ApplicationService, data *ServiceResourceModel) {
 	data.ID = types.Int64Value(service.ID)
 	data.ApplicationID = types.Int64Value(service.ApplicationID)
+	data.Name = types.StringValue(service.Name)
 	data.Type = types.StringValue(service.Type)
-	data.Version = types.StringValue(service.Version)
+	// Handle Version field - convert empty string to null, non-empty to string value
+	if service.Version != "" {
+		data.Version = types.StringValue(service.Version)
+	} else {
+		data.Version = types.StringNull()
+	}
 	data.Status = types.StringValue(service.Status)
+
+	// Set resource configuration
+	data.Replicas = types.Int64Value(service.Replicas)
+	data.CPURequest = types.StringValue(service.CPURequest)
+	data.MemoryRequest = types.StringValue(service.MemoryRequest)
+	data.StorageSize = types.StringValue(service.StorageSize)
+
+	// Handle extensions list
+	if len(service.Extensions) > 0 {
+		extensions := make([]types.String, len(service.Extensions))
+		for i, ext := range service.Extensions {
+			extensions[i] = types.StringValue(ext)
+		}
+		data.Extensions, _ = types.ListValueFrom(context.Background(), types.StringType, extensions)
+	} else {
+		data.Extensions = types.ListNull(types.StringType)
+	}
 
 	if len(service.Settings) > 0 {
 		settingsMap := make(map[string]types.String)
-		for k, v := range service.Settings {
+		for k, v := range service.Settings.ToMap() {
 			settingsMap[k] = types.StringValue(v)
 		}
 		data.Settings, _ = types.MapValueFrom(context.Background(), types.StringType, settingsMap)

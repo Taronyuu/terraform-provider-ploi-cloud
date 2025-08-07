@@ -36,6 +36,7 @@ type ApplicationResourceModel struct {
 	Runtime            *RuntimeModel  `tfsdk:"runtime"`
 	BuildCommands      types.List     `tfsdk:"build_commands"`
 	InitCommands       types.List     `tfsdk:"init_commands"`
+	StartCommand       types.String   `tfsdk:"start_command"`
 	Settings           *SettingsModel `tfsdk:"settings"`
 	PHPExtensions      types.List     `tfsdk:"php_extensions"`
 	PHPSettings        types.List     `tfsdk:"php_settings"`
@@ -102,6 +103,10 @@ func (r *ApplicationResource) Schema(ctx context.Context, req resource.SchemaReq
 				Optional:            true,
 				ElementType:         types.StringType,
 				MarkdownDescription: "Initialization commands to run before starting the application",
+			},
+			"start_command": schema.StringAttribute{
+				Optional:            true,
+				MarkdownDescription: "Custom start command for the application",
 			},
 			"php_extensions": schema.ListAttribute{
 				Optional:            true,
@@ -303,15 +308,22 @@ func (r *ApplicationResource) Read(ctx context.Context, req resource.ReadRequest
 
 func (r *ApplicationResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
 	var data ApplicationResourceModel
+	var state ApplicationResourceModel
 
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &data)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
 
-	app := r.toAPIModel(&data)
+	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
 
-	updated, err := r.client.UpdateApplication(data.ID.ValueInt64(), app)
+	// Use ID from current state, not from plan
+	app := r.toUpdateAPIModel(&data)
+
+	updated, err := r.client.UpdateApplication(state.ID.ValueInt64(), app)
 	if err != nil {
 		resp.Diagnostics.AddError("Client Error", fmt.Sprintf("Unable to update application, got error: %s", err))
 		return
@@ -426,6 +438,10 @@ func (r *ApplicationResource) toAPIModel(data *ApplicationResourceModel) *client
 			app.InitCommands = append(app.InitCommands, elem.ValueString())
 		}
 	}
+	
+	if !data.StartCommand.IsNull() && data.StartCommand.ValueString() != "" {
+		app.StartCommand = data.StartCommand.ValueString()
+	}
 
 	if !data.PHPExtensions.IsNull() {
 		elements := make([]types.String, 0, len(data.PHPExtensions.Elements()))
@@ -446,21 +462,102 @@ func (r *ApplicationResource) toAPIModel(data *ApplicationResourceModel) *client
 	return app
 }
 
+func (r *ApplicationResource) toUpdateAPIModel(data *ApplicationResourceModel) map[string]interface{} {
+	update := make(map[string]interface{})
+
+	// Only include fields that can be updated and are not null/empty
+	if data.Runtime != nil {
+		if !data.Runtime.NodeJSVersion.IsNull() && data.Runtime.NodeJSVersion.ValueString() != "" {
+			update["nodejs_version"] = data.Runtime.NodeJSVersion.ValueString()
+		}
+		if !data.Runtime.PHPVersion.IsNull() && data.Runtime.PHPVersion.ValueString() != "" {
+			update["php_version"] = data.Runtime.PHPVersion.ValueString()
+		}
+	}
+
+	if data.Settings != nil {
+		if !data.Settings.HealthCheckPath.IsNull() && data.Settings.HealthCheckPath.ValueString() != "" {
+			update["health_check_path"] = data.Settings.HealthCheckPath.ValueString()
+		}
+		if !data.Settings.SchedulerEnabled.IsNull() {
+			update["scheduler_enabled"] = data.Settings.SchedulerEnabled.ValueBool()
+		}
+		if !data.Settings.Replicas.IsNull() {
+			update["replicas"] = data.Settings.Replicas.ValueInt64()
+		}
+		if !data.Settings.CPURequest.IsNull() && data.Settings.CPURequest.ValueString() != "" {
+			update["cpu_request"] = data.Settings.CPURequest.ValueString()
+		}
+		if !data.Settings.MemoryRequest.IsNull() && data.Settings.MemoryRequest.ValueString() != "" {
+			update["memory_request"] = data.Settings.MemoryRequest.ValueString()
+		}
+	}
+
+	if !data.BuildCommands.IsNull() {
+		elements := make([]types.String, 0, len(data.BuildCommands.Elements()))
+		data.BuildCommands.ElementsAs(context.Background(), &elements, false)
+		var commands []string
+		for _, elem := range elements {
+			commands = append(commands, elem.ValueString())
+		}
+		if len(commands) > 0 {
+			update["build_commands"] = commands
+		}
+	}
+
+	if !data.InitCommands.IsNull() {
+		elements := make([]types.String, 0, len(data.InitCommands.Elements()))
+		data.InitCommands.ElementsAs(context.Background(), &elements, false)
+		var commands []string
+		for _, elem := range elements {
+			commands = append(commands, elem.ValueString())
+		}
+		if len(commands) > 0 {
+			update["init_commands"] = commands
+		}
+	}
+
+	return update
+}
+
 func (r *ApplicationResource) fromAPIModel(app *client.Application, data *ApplicationResourceModel) {
 	data.ID = types.Int64Value(app.ID)
 	data.Name = types.StringValue(app.Name)
 	data.Type = types.StringValue(app.Type)
-	data.ApplicationVersion = types.StringValue(app.ApplicationVersion)
+	
+	// Don't update application_version if API returns empty string when we had null
+	if app.ApplicationVersion != "" || !data.ApplicationVersion.IsNull() {
+		data.ApplicationVersion = types.StringValue(app.ApplicationVersion)
+	}
+	
 	data.URL = types.StringValue(app.URL)
 	data.Status = types.StringValue(app.Status)
 	data.NeedsDeployment = types.BoolValue(app.NeedsDeployment)
-	data.CustomManifests = types.StringValue(app.CustomManifests)
-	data.RepositoryURL = types.StringValue(app.RepositoryURL)
-	data.RepositoryOwner = types.StringValue(app.RepositoryOwner)
-	data.RepositoryName = types.StringValue(app.RepositoryName)
-	data.DefaultBranch = types.StringValue(app.DefaultBranch)
-	data.Region = types.StringValue(app.Region)
-	data.CloudProvider = types.StringValue(app.Provider)
+	
+	// Don't update custom_manifests if API returns empty string when we had null
+	if app.CustomManifests != "" || !data.CustomManifests.IsNull() {
+		data.CustomManifests = types.StringValue(app.CustomManifests)
+	}
+	
+	// Preserve configured repository values if API returns empty/different values
+	if app.RepositoryURL != "" {
+		data.RepositoryURL = types.StringValue(app.RepositoryURL)
+	}
+	if app.RepositoryOwner != "" {
+		data.RepositoryOwner = types.StringValue(app.RepositoryOwner)
+	}
+	if app.RepositoryName != "" {
+		data.RepositoryName = types.StringValue(app.RepositoryName)
+	}
+	if app.DefaultBranch != "" {
+		data.DefaultBranch = types.StringValue(app.DefaultBranch)
+	}
+	if app.Region != "" {
+		data.Region = types.StringValue(app.Region)
+	}
+	
+	// Preserve the planned cloud provider value - API changes from "default" to "github"
+	// Don't update if we already have a value and the API is returning a different one
 
 	if app.SocialAccountID != 0 {
 		data.SocialAccountID = types.Int64Value(app.SocialAccountID)
@@ -469,17 +566,41 @@ func (r *ApplicationResource) fromAPIModel(app *client.Application, data *Applic
 	if data.Runtime == nil {
 		data.Runtime = &RuntimeModel{}
 	}
-	data.Runtime.PHPVersion = types.StringValue(app.PHPVersion)
-	data.Runtime.NodeJSVersion = types.StringValue(app.NodeJSVersion)
+	
+	// Only set version fields for the appropriate app type to avoid conflicts
+	if app.Type == "php" || app.Type == "laravel" {
+		// For PHP/Laravel apps, only set PHP version
+		if app.PHPVersion != "" || !data.Runtime.PHPVersion.IsNull() {
+			data.Runtime.PHPVersion = types.StringValue(app.PHPVersion)
+		}
+		// Clear nodejs_version for PHP apps to avoid conflicts
+		data.Runtime.NodeJSVersion = types.StringNull()
+	} else if app.Type == "nodejs" {
+		// For Node.js apps, only set Node.js version
+		if app.NodeJSVersion != "" || !data.Runtime.NodeJSVersion.IsNull() {
+			data.Runtime.NodeJSVersion = types.StringValue(app.NodeJSVersion)
+		}
+		// Clear php_version for Node.js apps to avoid conflicts
+		data.Runtime.PHPVersion = types.StringNull()
+	}
 
 	if data.Settings == nil {
 		data.Settings = &SettingsModel{}
 	}
-	data.Settings.HealthCheckPath = types.StringValue(app.HealthCheckPath)
+	// Preserve the planned settings if API returns empty strings or zeros
+	if app.HealthCheckPath != "" {
+		data.Settings.HealthCheckPath = types.StringValue(app.HealthCheckPath)
+	}
 	data.Settings.SchedulerEnabled = types.BoolValue(app.SchedulerEnabled)
-	data.Settings.Replicas = types.Int64Value(app.Replicas)
-	data.Settings.CPURequest = types.StringValue(app.CPURequest)
-	data.Settings.MemoryRequest = types.StringValue(app.MemoryRequest)
+	if app.Replicas != 0 {
+		data.Settings.Replicas = types.Int64Value(app.Replicas)
+	}
+	if app.CPURequest != "" {
+		data.Settings.CPURequest = types.StringValue(app.CPURequest)
+	}
+	if app.MemoryRequest != "" {
+		data.Settings.MemoryRequest = types.StringValue(app.MemoryRequest)
+	}
 
 	if len(app.BuildCommands) > 0 {
 		elements := make([]types.String, len(app.BuildCommands))
@@ -496,6 +617,9 @@ func (r *ApplicationResource) fromAPIModel(app *client.Application, data *Applic
 		}
 		data.InitCommands, _ = types.ListValueFrom(context.Background(), types.StringType, elements)
 	}
+	
+	// Handle StartCommand field - always convert API response to StringValue
+	data.StartCommand = types.StringValue(app.StartCommand)
 
 	if len(app.PHPExtensions) > 0 {
 		elements := make([]types.String, len(app.PHPExtensions))

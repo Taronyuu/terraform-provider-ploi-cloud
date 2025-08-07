@@ -30,6 +30,7 @@ type VolumeResourceModel struct {
 	Name          types.String `tfsdk:"name"`
 	Size          types.Int64  `tfsdk:"size"`
 	MountPath     types.String `tfsdk:"mount_path"`
+	StorageClass  types.String `tfsdk:"storage_class"`
 	ResizeStatus  types.String `tfsdk:"resize_status"`
 }
 
@@ -61,6 +62,11 @@ func (r *VolumeResource) Schema(ctx context.Context, req resource.SchemaRequest,
 			"mount_path": schema.StringAttribute{
 				Required:            true,
 				MarkdownDescription: "Path where the volume is mounted in the container",
+			},
+			"storage_class": schema.StringAttribute{
+				Optional:            true,
+				Computed:            true,
+				MarkdownDescription: "Storage class for the volume",
 			},
 			"resize_status": schema.StringAttribute{
 				Computed:            true,
@@ -202,6 +208,10 @@ func (r *VolumeResource) toAPIModel(data *VolumeResourceModel) *client.Applicati
 	if !data.ID.IsNull() {
 		volume.ID = data.ID.ValueInt64()
 	}
+	
+	if !data.StorageClass.IsNull() && data.StorageClass.ValueString() != "" {
+		volume.StorageClass = data.StorageClass.ValueString()
+	}
 
 	return volume
 }
@@ -212,5 +222,6 @@ func (r *VolumeResource) fromAPIModel(volume *client.ApplicationVolume, data *Vo
 	data.Name = types.StringValue(volume.Name)
 	data.Size = types.Int64Value(volume.Size)
 	data.MountPath = types.StringValue(volume.MountPath)
+	data.StorageClass = types.StringValue(volume.StorageClass)
 	data.ResizeStatus = types.StringValue(volume.ResizeStatus)
 }
