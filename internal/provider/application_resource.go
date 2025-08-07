@@ -259,6 +259,21 @@ func (r *ApplicationResource) Create(ctx context.Context, req resource.CreateReq
 
 	r.fromAPIModel(created, &data)
 
+	// Automatically trigger deployment after creation
+	if created.NeedsDeployment {
+		err := r.client.DeployApplication(created.ID)
+		if err != nil {
+			resp.Diagnostics.AddError("Deploy Error", fmt.Sprintf("Application created but deployment failed: %s", err))
+			// Don't return here - the application was created successfully, just deployment failed
+		}
+		
+		// Re-read the application to get updated deployment status
+		refreshed, err := r.client.GetApplication(created.ID)
+		if err == nil && refreshed != nil {
+			r.fromAPIModel(refreshed, &data)
+		}
+	}
+
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 }
 
@@ -303,6 +318,21 @@ func (r *ApplicationResource) Update(ctx context.Context, req resource.UpdateReq
 	}
 
 	r.fromAPIModel(updated, &data)
+
+	// Automatically trigger deployment after update if needed
+	if updated.NeedsDeployment {
+		err := r.client.DeployApplication(updated.ID)
+		if err != nil {
+			resp.Diagnostics.AddError("Deploy Error", fmt.Sprintf("Application updated but deployment failed: %s", err))
+			// Don't return here - the application was updated successfully, just deployment failed
+		}
+		
+		// Re-read the application to get updated deployment status
+		refreshed, err := r.client.GetApplication(updated.ID)
+		if err == nil && refreshed != nil {
+			r.fromAPIModel(refreshed, &data)
+		}
+	}
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 }
