@@ -44,7 +44,8 @@ func (r *WorkerResource) Metadata(ctx context.Context, req resource.MetadataRequ
 
 func (r *WorkerResource) Schema(ctx context.Context, req resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		MarkdownDescription: "Manages a background worker for a Ploi Cloud application",
+		DeprecationMessage:  "Worker resources are deprecated. Use ploi-cloud_service with type 'worker' instead. See migration guide: https://docs.ploi.io/terraform-provider/migration/workers",
+		MarkdownDescription: "**DEPRECATED**: Worker resources are deprecated. Use `ploi-cloud_service` with `type = \"worker\"` instead.\n\nThis resource is deprecated because workers are now handled as services in the Ploi Cloud API. Please migrate your configurations to use the service resource instead.\n\n## Migration Guide\n\nReplace your worker resource:\n\n```hcl\nresource \"ploicloud_worker\" \"queue\" {\n  application_id = ploicloud_application.app.id\n  name           = \"queue-worker\"\n  command        = \"php artisan queue:work\"\n  replicas       = 2\n}\n```\n\nWith a service resource:\n\n```hcl\nresource \"ploicloud_service\" \"queue\" {\n  application_id = ploicloud_application.app.id\n  service_name   = \"queue-worker\"\n  type           = \"worker\"\n  command        = \"php artisan queue:work\"\n  replicas       = 2\n}\n```",
 
 		Attributes: map[string]schema.Attribute{
 			"id": schema.Int64Attribute{
@@ -118,17 +119,36 @@ func (r *WorkerResource) Create(ctx context.Context, req resource.CreateRequest,
 		return
 	}
 
-	worker := r.toAPIModel(&data)
-
-	created, err := r.client.CreateWorker(worker)
-	if err != nil {
-		resp.Diagnostics.AddError("Client Error", fmt.Sprintf("Unable to create worker, got error: %s", err))
-		return
-	}
-
-	r.fromAPIModel(created, &data)
-
-	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
+	// Prevent creation of new worker resources and provide migration guidance
+	resp.Diagnostics.AddError(
+		"Worker Resource Deprecated",
+		fmt.Sprintf("Worker resources are deprecated and cannot be created. Please use the 'ploicloud_service' resource instead.\n\n"+
+			"Migration Guide:\n"+
+			"Replace this worker configuration:\n\n"+
+			"resource \"ploicloud_worker\" \"example\" {\n"+
+			"  application_id = %d\n"+
+			"  name           = \"%s\"\n"+
+			"  command        = \"%s\"\n"+
+			"  replicas       = %d\n"+
+			"}\n\n"+
+			"With this service configuration:\n\n"+
+			"resource \"ploicloud_service\" \"example\" {\n"+
+			"  application_id = %d\n"+
+			"  service_name   = \"%s\"\n"+
+			"  type           = \"worker\"\n"+
+			"  command        = \"%s\"\n"+
+			"  replicas       = %d\n"+
+			"}\n\n"+
+			"Documentation: https://docs.ploi.io/terraform-provider/migration/workers",
+			data.ApplicationID.ValueInt64(),
+			data.Name.ValueString(),
+			data.Command.ValueString(),
+			data.Replicas.ValueInt64(),
+			data.ApplicationID.ValueInt64(),
+			data.Name.ValueString(),
+			data.Command.ValueString(),
+			data.Replicas.ValueInt64()),
+	)
 }
 
 func (r *WorkerResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {

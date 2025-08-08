@@ -38,6 +38,7 @@ type ServiceResourceModel struct {
 	MemoryRequest types.String `tfsdk:"memory_request"`
 	StorageSize   types.String `tfsdk:"storage_size"`
 	Extensions    types.List   `tfsdk:"extensions"`
+	Command       types.String `tfsdk:"command"`
 	Status        types.String `tfsdk:"status"`
 }
 
@@ -65,9 +66,9 @@ func (r *ServiceResource) Schema(ctx context.Context, req resource.SchemaRequest
 			},
 			"type": schema.StringAttribute{
 				Required:            true,
-				MarkdownDescription: "Service type (mysql, postgresql, redis, valkey, rabbitmq, mongodb, minio, sftp)",
+				MarkdownDescription: "Service type (mysql, postgresql, redis, valkey, rabbitmq, mongodb, minio, sftp, worker)",
 				Validators: []validator.String{
-					stringvalidator.OneOf("mysql", "postgresql", "redis", "valkey", "rabbitmq", "mongodb", "minio", "sftp"),
+					stringvalidator.OneOf("mysql", "postgresql", "redis", "valkey", "rabbitmq", "mongodb", "minio", "sftp", "worker"),
 				},
 			},
 			"version": schema.StringAttribute{
@@ -104,6 +105,10 @@ func (r *ServiceResource) Schema(ctx context.Context, req resource.SchemaRequest
 				Optional:            true,
 				ElementType:         types.StringType,
 				MarkdownDescription: "Extensions for PostgreSQL services (e.g., ['uuid-ossp', 'pgcrypto'])",
+			},
+			"command": schema.StringAttribute{
+				Optional:            true,
+				MarkdownDescription: "Command to run for worker services (e.g., 'php artisan queue:work'). Only applicable to worker type services.",
 			},
 			"status": schema.StringAttribute{
 				Computed:            true,
@@ -295,6 +300,11 @@ func (r *ServiceResource) toAPIModel(data *ServiceResourceModel) *client.Applica
 		service.Extensions = extensions
 	}
 
+	// Handle command for worker services
+	if !data.Command.IsNull() && data.Command.ValueString() != "" {
+		service.Command = data.Command.ValueString()
+	}
+
 	return service
 }
 
@@ -326,6 +336,13 @@ func (r *ServiceResource) fromAPIModel(service *client.ApplicationService, data 
 		data.Extensions, _ = types.ListValueFrom(context.Background(), types.StringType, extensions)
 	} else {
 		data.Extensions = types.ListNull(types.StringType)
+	}
+
+	// Handle command field
+	if service.Command != "" {
+		data.Command = types.StringValue(service.Command)
+	} else {
+		data.Command = types.StringNull()
 	}
 
 	if len(service.Settings) > 0 {

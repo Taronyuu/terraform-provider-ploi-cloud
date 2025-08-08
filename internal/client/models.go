@@ -148,8 +148,8 @@ type Team struct {
 }
 
 type ErrorResponse struct {
-	Message string            `json:"message"`
-	Errors  map[string]string `json:"errors,omitempty"`
+	Message string                 `json:"message"`
+	Errors  map[string]interface{} `json:"errors,omitempty"`
 }
 
 type ListResponse[T any] struct {

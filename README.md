@@ -81,10 +81,11 @@ resource "ploicloud_service" "db" {
   }
 }
 
-# Queue Worker
-resource "ploicloud_worker" "queue" {
+# Queue Worker (as service)
+resource "ploicloud_service" "queue" {
   application_id = ploicloud_application.api.id
-  name          = "default-queue"
+  service_name   = "default-queue"
+  type          = "worker"
   command       = "php artisan queue:work"
   replicas      = 2
 }
@@ -92,31 +93,38 @@ resource "ploicloud_worker" "queue" {
 
 ## 📚 Resources
 
-| Resource | Description | Recent Enhancements |
-|----------|-------------|-------------------|
-| `ploicloud_application` | Applications (Laravel, WordPress, etc.) | ✨ `start_command` - Custom start commands |
-| `ploicloud_service` | Databases, caches, message queues | ✨ `storage_size`, `extensions` (PostgreSQL) |
-| `ploicloud_domain` | Custom domains with SSL | |
-| `ploicloud_secret` | Environment variables | |
-| `ploicloud_volume` | Persistent storage | ✨ `storage_class` - Storage class specification |
-| `ploicloud_worker` | Background job workers | ✨ `type`, `memory_request`, `cpu_request` |
+| Resource | Description | Status |
+|----------|-------------|--------|
+| `ploicloud_application` | Applications (Laravel, WordPress, etc.) | ✨ Enhanced logging and error handling |
+| `ploicloud_service` | Databases, caches, message queues, **workers** | ✨ Worker support, enhanced validation |
+| `ploicloud_domain` | Custom domains with SSL | ✨ Enhanced error messages |
+| `ploicloud_secret` | Environment variables | ✨ Enhanced validation |
+| `ploicloud_volume` | Persistent storage | ⚠️ **Read-only** - Use services with `storage_size` |
+| `ploicloud_worker` | Background job workers | ⚠️ **Deprecated** - Use services with `type = "worker"` |
 
-### 🆕 New in v1.1.0
+### 🆕 New in v1.2.0 - API Error Fixes & Enhanced Reliability
 
-**Enhanced Application Resources:**
-- `start_command` - Override default application start commands for custom setups
+**🔧 Enhanced Error Handling & Logging:**
+- Comprehensive request/response logging with debug support (`TF_LOG=DEBUG`, `PLOI_DEBUG=1`)
+- Detailed 422 validation error parsing with field-specific suggestions
+- Automatic retry logic for transient API failures (5xx errors)
+- Sanitized logging to protect sensitive data (API tokens)
 
-**Enhanced Service Resources:**
-- `storage_size` - Configure storage allocation for databases and caches (e.g., "10Gi", "500Mi")
-- `extensions` - PostgreSQL extensions support (uuid-ossp, pgcrypto, citext, etc.)
+**🔄 Resource Strategy Updates:**
+- **Worker Resources**: Deprecated in favor of services with `type = "worker"`
+- **Volume Resources**: Read-only mode - volumes auto-created with storage services
+- **Service Resources**: Enhanced with worker support and comprehensive validation
 
-**Enhanced Worker Resources:**
-- `type` - Worker type specification (queue, scheduler, custom)
-- `memory_request` - Memory allocation for workers (e.g., "512Mi", "1Gi")
-- `cpu_request` - CPU allocation for workers (e.g., "250m", "1")
+**📝 Migration Support:**
+- Clear migration guidance for worker → service transitions
+- Backward compatibility maintained for existing deployments
+- Helpful error messages with actionable solutions
 
-**Enhanced Volume Resources:**
-- `storage_class` - Storage class for volumes (fast-ssd, standard, etc.)
+**✅ Previous Features (v1.1.0):**
+- `start_command` - Custom application start commands
+- `storage_size` - Storage allocation for databases and caches
+- `extensions` - PostgreSQL extensions support
+- Enhanced worker resource specifications
 
 ## 🧑‍💻 Development
 
@@ -136,6 +144,74 @@ make test
 # Test locally
 ./test-local.sh
 ```
+
+### 🐞 Debugging & Troubleshooting
+
+**Enable Enhanced Logging:**
+```bash
+# Enable comprehensive request/response logging
+export TF_LOG=DEBUG
+
+# Or use Ploi-specific debug logging
+export PLOI_DEBUG=1
+
+# Run your Terraform commands
+terraform plan
+terraform apply
+```
+
+**Common Issues & Solutions:**
+
+| Error | Solution |
+|-------|----------|
+| **422 Unprocessable Entity** | Check service configuration - missing required fields or invalid resource specifications |
+| **Worker resource not found** | Workers are now created as services with `type = "worker"` - see migration guide below |
+| **Volume POST not supported** | Volumes are auto-created with storage services - use service resources with `storage_size` |
+
+**Migration Guide:**
+
+*Worker Resources → Service Resources:*
+```hcl
+# ❌ OLD (deprecated)
+resource "ploicloud_worker" "queue" {
+  application_id = ploicloud_application.app.id
+  name          = "queue-worker"
+  command       = "php artisan queue:work"
+  replicas      = 2
+}
+
+# ✅ NEW (recommended)
+resource "ploicloud_service" "queue" {
+  application_id = ploicloud_application.app.id
+  service_name   = "queue-worker"
+  type          = "worker"
+  command       = "php artisan queue:work"
+  replicas      = 2
+}
+```
+
+*Volume Creation → Service Storage:*
+```hcl
+# ❌ OLD (not supported)
+resource "ploicloud_volume" "uploads" {
+  application_id = ploicloud_application.app.id
+  size          = "10Gi"
+}
+
+# ✅ NEW (creates volume automatically)
+resource "ploicloud_service" "database" {
+  application_id = ploicloud_application.app.id
+  type          = "mysql"
+  storage_size  = "10Gi"  # Volume created automatically
+}
+```
+
+**Troubleshooting Steps:**
+1. Enable debug logging with `export TF_LOG=DEBUG`
+2. Check API response details in logs
+3. Verify resource configurations match API requirements
+4. For 422 errors, review field-specific validation messages
+5. Check [API documentation](https://docs.ploi.io/cloud) for resource specifications
 
 ### Local Development Setup
 ```bash

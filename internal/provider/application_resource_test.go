@@ -137,7 +137,7 @@ func TestApplicationResource_StartCommand_fromAPIModel(t *testing.T) {
 				StartCommand: "",
 				Status:       "running",
 			},
-			expectedCmd: types.StringValue(""),
+			expectedCmd: types.StringNull(),
 		},
 		{
 			name: "application with nodejs start command",
@@ -286,10 +286,13 @@ func TestApplicationResource_StartCommand_UpdateAPIModel(t *testing.T) {
 	
 	result := resource.toUpdateAPIModel(data)
 	
-	// Note: toUpdateAPIModel doesn't currently include StartCommand
-	// This is testing the current behavior - may need updating if StartCommand is added to updates
-	if _, exists := result["start_command"]; exists {
-		t.Error("StartCommand should not be included in update model currently")
+	// StartCommand is now included in update model as part of consistency fixes
+	if _, exists := result["start_command"]; !exists {
+		t.Error("StartCommand should be included in update model to prevent consistency errors")
+	}
+	
+	if result["start_command"] != "node --max-old-space-size=4096 app.js" {
+		t.Errorf("Expected start_command 'node --max-old-space-size=4096 app.js', got '%v'", result["start_command"])
 	}
 	
 	// Verify other fields are included
@@ -508,5 +511,366 @@ func TestApplicationResource_StartCommand_ConversionAccuracy(t *testing.T) {
 	if !convertedData.StartCommand.Equal(originalData.StartCommand) {
 		t.Errorf("Round-trip conversion failed: expected %v, got %v", 
 			originalData.StartCommand, convertedData.StartCommand)
+	}
+}
+
+func TestApplicationResource_AdditionalDomains_toAPIModel(t *testing.T) {
+	resource := &ApplicationResource{}
+	
+	tests := []struct {
+		name            string
+		data            *ApplicationResourceModel
+		expectedDomains []string
+	}{
+		{
+			name: "application with additional domains",
+			data: &ApplicationResourceModel{
+				ID:   types.Int64Value(1),
+				Name: types.StringValue("test-app"),
+				Type: types.StringValue("laravel"),
+				AdditionalDomains: types.ListValueMust(types.StringType, []attr.Value{
+					types.StringValue("api.example.com"),
+					types.StringValue("admin.example.com"),
+				}),
+			},
+			expectedDomains: []string{"api.example.com", "admin.example.com"},
+		},
+		{
+			name: "application with single additional domain",
+			data: &ApplicationResourceModel{
+				ID:   types.Int64Value(2),
+				Name: types.StringValue("single-domain-app"),
+				Type: types.StringValue("nodejs"),
+				AdditionalDomains: types.ListValueMust(types.StringType, []attr.Value{
+					types.StringValue("www.example.com"),
+				}),
+			},
+			expectedDomains: []string{"www.example.com"},
+		},
+		{
+			name: "application with null additional domains",
+			data: &ApplicationResourceModel{
+				ID:                types.Int64Value(3),
+				Name:              types.StringValue("no-domains-app"),
+				Type:              types.StringValue("laravel"),
+				AdditionalDomains: types.ListNull(types.StringType),
+			},
+			expectedDomains: []string{},
+		},
+		{
+			name: "application with empty additional domains list",
+			data: &ApplicationResourceModel{
+				ID:                types.Int64Value(4),
+				Name:              types.StringValue("empty-domains-app"),
+				Type:              types.StringValue("laravel"),
+				AdditionalDomains: types.ListValueMust(types.StringType, []attr.Value{}),
+			},
+			expectedDomains: []string{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := resource.toAPIModel(tt.data)
+			
+			if len(result.Domains) != len(tt.expectedDomains) {
+				t.Errorf("Expected %d domains, got %d", len(tt.expectedDomains), len(result.Domains))
+				return
+			}
+			
+			// Verify each domain
+			for i, expectedDomain := range tt.expectedDomains {
+				if result.Domains[i].Domain != expectedDomain {
+					t.Errorf("Expected domain[%d] '%s', got '%s'", i, expectedDomain, result.Domains[i].Domain)
+				}
+			}
+			
+			// Verify other fields are preserved
+			if result.ID != tt.data.ID.ValueInt64() {
+				t.Errorf("Expected ID %d, got %d", tt.data.ID.ValueInt64(), result.ID)
+			}
+			if result.Name != tt.data.Name.ValueString() {
+				t.Errorf("Expected Name '%s', got '%s'", tt.data.Name.ValueString(), result.Name)
+			}
+		})
+	}
+}
+
+func TestApplicationResource_AdditionalDomains_fromAPIModel(t *testing.T) {
+	resource := &ApplicationResource{}
+	
+	tests := []struct {
+		name               string
+		app                *client.Application
+		expectedDomains    types.List
+	}{
+		{
+			name: "application with domains from API",
+			app: &client.Application{
+				ID:   1,
+				Name: "test-app",
+				Type: "laravel",
+				Domains: []client.ApplicationDomain{
+					{Domain: "api.example.com"},
+					{Domain: "admin.example.com"},
+				},
+				Status: "running",
+			},
+			expectedDomains: types.ListValueMust(types.StringType, []attr.Value{
+				types.StringValue("api.example.com"),
+				types.StringValue("admin.example.com"),
+			}),
+		},
+		{
+			name: "application with single domain from API",
+			app: &client.Application{
+				ID:   2,
+				Name: "single-domain-app",
+				Type: "nodejs",
+				Domains: []client.ApplicationDomain{
+					{Domain: "www.example.com"},
+				},
+				Status: "running",
+			},
+			expectedDomains: types.ListValueMust(types.StringType, []attr.Value{
+				types.StringValue("www.example.com"),
+			}),
+		},
+		{
+			name: "application with empty domains from API",
+			app: &client.Application{
+				ID:      3,
+				Name:    "no-domains-app",
+				Type:    "laravel",
+				Domains: []client.ApplicationDomain{},
+				Status:  "running",
+			},
+			expectedDomains: types.ListNull(types.StringType),
+		},
+		{
+			name: "application with nil domains from API",
+			app: &client.Application{
+				ID:      4,
+				Name:    "nil-domains-app",
+				Type:    "laravel",
+				Domains: nil,
+				Status:  "running",
+			},
+			expectedDomains: types.ListNull(types.StringType),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var data ApplicationResourceModel
+			
+			// Initialize with null to test fromAPIModel behavior
+			data.AdditionalDomains = types.ListNull(types.StringType)
+			
+			resource.fromAPIModel(tt.app, &data)
+			
+			// For empty/nil domains, both should be null/empty
+			if len(tt.app.Domains) == 0 {
+				if !data.AdditionalDomains.IsNull() && len(data.AdditionalDomains.Elements()) > 0 {
+					t.Errorf("Expected AdditionalDomains to be null or empty, got %v", data.AdditionalDomains)
+				}
+			} else {
+				if !data.AdditionalDomains.Equal(tt.expectedDomains) {
+					t.Errorf("Expected AdditionalDomains %v, got %v", tt.expectedDomains, data.AdditionalDomains)
+				}
+			}
+		})
+	}
+}
+
+func TestApplicationResource_AdditionalDomains_UpdateAPIModel(t *testing.T) {
+	resource := &ApplicationResource{}
+	
+	tests := []struct {
+		name            string
+		data            *ApplicationResourceModel
+		expectedDomains []string
+		shouldInclude   bool
+	}{
+		{
+			name: "update with additional domains",
+			data: &ApplicationResourceModel{
+				AdditionalDomains: types.ListValueMust(types.StringType, []attr.Value{
+					types.StringValue("new-api.example.com"),
+					types.StringValue("new-admin.example.com"),
+				}),
+			},
+			expectedDomains: []string{"new-api.example.com", "new-admin.example.com"},
+			shouldInclude:   true,
+		},
+		{
+			name: "update with null domains",
+			data: &ApplicationResourceModel{
+				AdditionalDomains: types.ListNull(types.StringType),
+			},
+			expectedDomains: []string{},
+			shouldInclude:   false,
+		},
+		{
+			name: "update with empty domains list",
+			data: &ApplicationResourceModel{
+				AdditionalDomains: types.ListValueMust(types.StringType, []attr.Value{}),
+			},
+			expectedDomains: []string{},
+			shouldInclude:   false,
+		},
+	}
+	
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := resource.toUpdateAPIModel(tt.data)
+			
+			domains, exists := result["additional_domains"]
+			if tt.shouldInclude {
+				if !exists {
+					t.Error("Expected additional_domains to be included in update")
+					return
+				}
+				
+				domainStrings, ok := domains.([]string)
+				if !ok {
+					t.Errorf("Expected additional_domains to be []string, got %T", domains)
+					return
+				}
+				
+				if len(domainStrings) != len(tt.expectedDomains) {
+					t.Errorf("Expected %d domains, got %d", len(tt.expectedDomains), len(domainStrings))
+					return
+				}
+				
+				for i, expected := range tt.expectedDomains {
+					if domainStrings[i] != expected {
+						t.Errorf("Expected domain[%d] '%s', got '%s'", i, expected, domainStrings[i])
+					}
+				}
+			} else {
+				if exists {
+					t.Error("Expected additional_domains to not be included in update when null/empty")
+				}
+			}
+		})
+	}
+}
+
+func TestApplicationResource_AdditionalDomains_BackwardCompatibility(t *testing.T) {
+	resource := &ApplicationResource{}
+	
+	// Test that existing application configurations without additional_domains still work
+	data := &ApplicationResourceModel{
+		ID:   types.Int64Value(1),
+		Name: types.StringValue("legacy-app"),
+		Type: types.StringValue("laravel"),
+		// AdditionalDomains is null/unset (backward compatibility)
+		AdditionalDomains: types.ListNull(types.StringType),
+	}
+	
+	result := resource.toAPIModel(data)
+	
+	// Verify basic fields are preserved
+	if result.ID != 1 {
+		t.Errorf("Expected ID 1, got %d", result.ID)
+	}
+	if result.Name != "legacy-app" {
+		t.Errorf("Expected Name 'legacy-app', got %s", result.Name)
+	}
+	if result.Type != "laravel" {
+		t.Errorf("Expected Type 'laravel', got %s", result.Type)
+	}
+	
+	// Verify domains are empty when null
+	if len(result.Domains) != 0 {
+		t.Errorf("Expected no domains, got %d", len(result.Domains))
+	}
+}
+
+func TestApplicationResource_AdditionalDomains_ConversionAccuracy(t *testing.T) {
+	resource := &ApplicationResource{}
+	
+	// Test round-trip conversion (terraform -> api -> terraform)
+	originalData := &ApplicationResourceModel{
+		Name: types.StringValue("conversion-test"),
+		Type: types.StringValue("laravel"),
+		AdditionalDomains: types.ListValueMust(types.StringType, []attr.Value{
+			types.StringValue("test1.example.com"),
+			types.StringValue("test2.example.com"),
+		}),
+	}
+	
+	// Convert to API model
+	apiModel := resource.toAPIModel(originalData)
+	
+	// Convert back from API model
+	var convertedData ApplicationResourceModel
+	resource.fromAPIModel(apiModel, &convertedData)
+	
+	// Verify round-trip accuracy
+	if !convertedData.AdditionalDomains.Equal(originalData.AdditionalDomains) {
+		t.Errorf("Round-trip conversion failed: expected %v, got %v", 
+			originalData.AdditionalDomains, convertedData.AdditionalDomains)
+	}
+}
+
+func TestApplicationResource_AdditionalDomains_WithOtherFields(t *testing.T) {
+	resource := &ApplicationResource{}
+	
+	// Test that additional_domains works correctly with other application fields
+	data := &ApplicationResourceModel{
+		ID:                 types.Int64Value(1),
+		Name:               types.StringValue("full-app"),
+		Type:               types.StringValue("laravel"),
+		ApplicationVersion: types.StringValue("11.x"),
+		StartCommand:       types.StringValue("php artisan serve"),
+		AdditionalDomains: types.ListValueMust(types.StringType, []attr.Value{
+			types.StringValue("api.full-app.com"),
+			types.StringValue("admin.full-app.com"),
+		}),
+		BuildCommands: types.ListValueMust(types.StringType, []attr.Value{
+			types.StringValue("composer install --no-dev"),
+		}),
+		Runtime: &RuntimeModel{
+			PHPVersion: types.StringValue("8.3"),
+		},
+		Settings: &SettingsModel{
+			MemoryRequest: types.StringValue("1Gi"),
+			Replicas:      types.Int64Value(2),
+		},
+	}
+	
+	result := resource.toAPIModel(data)
+	
+	// Verify additional_domains are preserved
+	if len(result.Domains) != 2 {
+		t.Errorf("Expected 2 domains, got %d", len(result.Domains))
+	}
+	if result.Domains[0].Domain != "api.full-app.com" {
+		t.Errorf("Expected first domain 'api.full-app.com', got '%s'", result.Domains[0].Domain)
+	}
+	if result.Domains[1].Domain != "admin.full-app.com" {
+		t.Errorf("Expected second domain 'admin.full-app.com', got '%s'", result.Domains[1].Domain)
+	}
+	
+	// Verify other fields are also preserved
+	if result.ApplicationVersion != "11.x" {
+		t.Errorf("Expected ApplicationVersion '11.x', got '%s'", result.ApplicationVersion)
+	}
+	if result.StartCommand != "php artisan serve" {
+		t.Errorf("Expected StartCommand 'php artisan serve', got '%s'", result.StartCommand)
+	}
+	if result.PHPVersion != "8.3" {
+		t.Errorf("Expected PHPVersion '8.3', got '%s'", result.PHPVersion)
+	}
+	if result.MemoryRequest != "1Gi" {
+		t.Errorf("Expected MemoryRequest '1Gi', got '%s'", result.MemoryRequest)
+	}
+	if result.Replicas != 2 {
+		t.Errorf("Expected Replicas 2, got %d", result.Replicas)
+	}
+	if len(result.BuildCommands) != 1 {
+		t.Errorf("Expected 1 build command, got %d", len(result.BuildCommands))
 	}
 }

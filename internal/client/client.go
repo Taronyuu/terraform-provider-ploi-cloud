@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -14,6 +17,34 @@ type Client struct {
 	httpClient  *http.Client
 	apiToken    string
 	apiEndpoint string
+	logger      *Logger
+}
+
+// Logger provides structured logging for API requests and responses
+type Logger struct {
+	enabled bool
+	debug   bool
+}
+
+// LogEntry represents a structured log entry for an API call
+type LogEntry struct {
+	Timestamp    time.Time `json:"timestamp"`
+	Method       string    `json:"method"`
+	URL          string    `json:"url"`
+	RequestBody  string    `json:"request_body,omitempty"`
+	StatusCode   int       `json:"status_code"`
+	ResponseBody string    `json:"response_body,omitempty"`
+	Error        string    `json:"error,omitempty"`
+	Duration     time.Duration `json:"duration"`
+}
+
+// DetailedError provides enhanced error information with actionable feedback
+type DetailedError struct {
+	StatusCode int                 `json:"status_code"`
+	Message    string              `json:"message"`
+	Errors     map[string][]string `json:"errors,omitempty"`
+	Suggestion string              `json:"suggestion,omitempty"`
+	DocsLink   string              `json:"docs_link,omitempty"`
 }
 
 func NewClient(apiToken string, apiEndpoint *string) *Client {
@@ -22,89 +53,132 @@ func NewClient(apiToken string, apiEndpoint *string) *Client {
 		endpoint = *apiEndpoint
 	}
 
+	// Initialize logger based on environment variables
+	logger := &Logger{
+		enabled: os.Getenv("TF_LOG") == "DEBUG" || os.Getenv("PLOI_DEBUG") == "1",
+		debug:   os.Getenv("TF_LOG") == "DEBUG" || os.Getenv("PLOI_DEBUG") == "1",
+	}
+
 	return &Client{
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
 		apiToken:    apiToken,
 		apiEndpoint: endpoint,
+		logger:      logger,
 	}
 }
 
 func (c *Client) doRequest(method, path string, body interface{}) (*http.Response, error) {
-	if c == nil {
-		return nil, fmt.Errorf("client is nil")
-	}
-	if c.httpClient == nil {
-		return nil, fmt.Errorf("http client is nil")
-	}
-	if c.apiEndpoint == "" {
-		return nil, fmt.Errorf("api endpoint is empty")
-	}
-	if c.apiToken == "" {
-		return nil, fmt.Errorf("api token is empty")
-	}
+	return c.doRequestWithRetry(method, path, body, 3)
+}
 
-	var req *http.Request
-	var err error
-
-	url := c.apiEndpoint + path
+func (c *Client) doRequestWithRetry(method, path string, body interface{}, maxRetries int) (*http.Response, error) {
+	var lastResp *http.Response
+	var lastErr error
 	
-	if body != nil {
-		bodyBytes, jsonErr := json.Marshal(body)
-		if jsonErr != nil {
-			return nil, fmt.Errorf("failed to marshal request body: %w", jsonErr)
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		start := time.Now()
+		
+		if c == nil {
+			return nil, fmt.Errorf("client is nil")
 		}
-		if bodyBytes == nil {
-			bodyBytes = []byte{}
+		if c.httpClient == nil {
+			return nil, fmt.Errorf("http client is nil")
 		}
-		req, err = http.NewRequest(method, url, bytes.NewReader(bodyBytes))
-	} else {
-		req, err = http.NewRequest(method, url, nil)
-	}
-	
-	if err != nil {
-		return nil, fmt.Errorf("failed to create HTTP request: %w", err)
-	}
-	
-	if req == nil {
-		return nil, fmt.Errorf("request is nil after creation")
-	}
+		if c.apiEndpoint == "" {
+			return nil, fmt.Errorf("api endpoint is empty")
+		}
+		if c.apiToken == "" {
+			return nil, fmt.Errorf("api token is empty")
+		}
 
-	req.Header.Set("Authorization", "Bearer "+c.apiToken)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
+		var req *http.Request
+		var err error
+		var bodyBytes []byte
+		var requestBodyStr string
 
-	// Debug logging if TF_LOG=DEBUG or PLOI_DEBUG=1
-	debug := os.Getenv("TF_LOG") == "DEBUG" || os.Getenv("PLOI_DEBUG") == "1"
-	if debug {
-		fmt.Printf("[DEBUG] Ploi API Request: %s %s\n", method, url)
+		url := c.apiEndpoint + path
+		
 		if body != nil {
-			bodyBytes, _ := json.MarshalIndent(body, "", "  ")
-			fmt.Printf("[DEBUG] Request Body:\n%s\n", string(bodyBytes))
+			bodyBytes, err = json.Marshal(body)
+			if err != nil {
+				c.logRequest(method, url, "", 0, "", fmt.Sprintf("failed to marshal request body: %v", err), time.Since(start))
+				return nil, fmt.Errorf("failed to marshal request body: %w", err)
+			}
+			if bodyBytes == nil {
+				bodyBytes = []byte{}
+			}
+			requestBodyStr = c.sanitizeBody(string(bodyBytes))
+			req, err = http.NewRequest(method, url, bytes.NewReader(bodyBytes))
+		} else {
+			req, err = http.NewRequest(method, url, nil)
 		}
-	}
+		
+		if err != nil {
+			c.logRequest(method, url, requestBodyStr, 0, "", fmt.Sprintf("failed to create HTTP request: %v", err), time.Since(start))
+			return nil, fmt.Errorf("failed to create HTTP request: %w", err)
+		}
+		
+		if req == nil {
+			c.logRequest(method, url, requestBodyStr, 0, "", "request is nil after creation", time.Since(start))
+			return nil, fmt.Errorf("request is nil after creation")
+		}
 
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to execute HTTP request: %w", err)
-	}
+		req.Header.Set("Authorization", "Bearer "+c.apiToken)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json")
 
-	if debug {
-		fmt.Printf("[DEBUG] Response Status: %s\n", resp.Status)
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			lastErr = err
+			c.logRequest(method, url, requestBodyStr, 0, "", fmt.Sprintf("failed to execute HTTP request: %v", err), time.Since(start))
+			
+			if attempt < maxRetries {
+				backoffDuration := time.Duration(attempt+1) * time.Second
+				c.logRequest(method, url, requestBodyStr, 0, "", fmt.Sprintf("retrying in %v (attempt %d/%d)", backoffDuration, attempt+1, maxRetries+1), time.Since(start))
+				time.Sleep(backoffDuration)
+				continue
+			}
+			return nil, fmt.Errorf("failed to execute HTTP request after %d attempts: %w", maxRetries+1, err)
+		}
+
+		// Read response body for logging and error handling
+		var responseBodyStr string
 		if resp.Body != nil {
-			// Read response body for debugging
 			bodyBytes, readErr := io.ReadAll(resp.Body)
 			resp.Body.Close()
 			if readErr == nil {
-				fmt.Printf("[DEBUG] Response Body:\n%s\n", string(bodyBytes))
+				responseBodyStr = string(bodyBytes)
 				// Recreate the response body for the caller
 				resp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 			}
 		}
+
+		// Log the completed request
+		var errorMsg string
+		if resp.StatusCode >= 400 {
+			errorMsg = fmt.Sprintf("HTTP %d: %s", resp.StatusCode, resp.Status)
+		}
+		
+		// Check if we should retry based on status code
+		if resp.StatusCode >= 500 && resp.StatusCode < 600 && attempt < maxRetries {
+			lastResp = resp
+			backoffDuration := time.Duration(attempt+1) * time.Second
+			c.logRequest(method, url, requestBodyStr, resp.StatusCode, responseBodyStr, fmt.Sprintf("%s - retrying in %v (attempt %d/%d)", errorMsg, backoffDuration, attempt+1, maxRetries+1), time.Since(start))
+			time.Sleep(backoffDuration)
+			continue
+		}
+		
+		c.logRequest(method, url, requestBodyStr, resp.StatusCode, responseBodyStr, errorMsg, time.Since(start))
+		return resp, nil
 	}
 
-	return resp, nil
+	// If we get here, all retries failed
+	if lastResp != nil {
+		return lastResp, nil
+	}
+	return nil, lastErr
 }
 
 func (c *Client) CreateApplication(app *Application) (*Application, error) {
@@ -115,11 +189,7 @@ func (c *Client) CreateApplication(app *Application) (*Application, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
-		var errResp ErrorResponse
-		if err := json.NewDecoder(resp.Body).Decode(&errResp); err != nil {
-			return nil, fmt.Errorf("failed to create application: %s", resp.Status)
-		}
-		return nil, fmt.Errorf("failed to create application: %s", errResp.Message)
+		return nil, c.handleErrorResponse(resp, "create application")
 	}
 
 	var result SingleResponse[Application]
@@ -142,11 +212,7 @@ func (c *Client) GetApplication(id int64) (*Application, error) {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		var errResp ErrorResponse
-		if err := json.NewDecoder(resp.Body).Decode(&errResp); err != nil {
-			return nil, fmt.Errorf("failed to get application: %s", resp.Status)
-		}
-		return nil, fmt.Errorf("failed to get application: %s", errResp.Message)
+		return nil, c.handleErrorResponse(resp, "get application")
 	}
 
 	var result SingleResponse[Application]
@@ -165,11 +231,7 @@ func (c *Client) UpdateApplication(id int64, updateData interface{}) (*Applicati
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		var errResp ErrorResponse
-		if err := json.NewDecoder(resp.Body).Decode(&errResp); err != nil {
-			return nil, fmt.Errorf("failed to update application: %s", resp.Status)
-		}
-		return nil, fmt.Errorf("failed to update application: %s", errResp.Message)
+		return nil, c.handleErrorResponse(resp, "update application")
 	}
 
 	var result SingleResponse[Application]
@@ -188,11 +250,7 @@ func (c *Client) DeleteApplication(id int64) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
-		var errResp ErrorResponse
-		if err := json.NewDecoder(resp.Body).Decode(&errResp); err != nil {
-			return fmt.Errorf("failed to delete application: %s", resp.Status)
-		}
-		return fmt.Errorf("failed to delete application: %s", errResp.Message)
+		return c.handleErrorResponse(resp, "delete application")
 	}
 
 	return nil
@@ -205,7 +263,7 @@ func (c *Client) DeployApplication(id int64) error {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
 		var errResp ErrorResponse
 		if err := json.NewDecoder(resp.Body).Decode(&errResp); err != nil {
 			return fmt.Errorf("failed to deploy application: %s", resp.Status)
@@ -217,6 +275,11 @@ func (c *Client) DeployApplication(id int64) error {
 }
 
 func (c *Client) CreateService(service *ApplicationService) (*ApplicationService, error) {
+	// Validate service before making API request
+	if err := c.ValidateServiceRequest(service); err != nil {
+		return nil, err
+	}
+
 	resp, err := c.doRequest("POST", fmt.Sprintf("/applications/%d/services", service.ApplicationID), service)
 	if err != nil {
 		return nil, err
@@ -224,11 +287,7 @@ func (c *Client) CreateService(service *ApplicationService) (*ApplicationService
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
-		var errResp ErrorResponse
-		if err := json.NewDecoder(resp.Body).Decode(&errResp); err != nil {
-			return nil, fmt.Errorf("failed to create service: %s", resp.Status)
-		}
-		return nil, fmt.Errorf("failed to create service: %s", errResp.Message)
+		return nil, c.handleErrorResponse(resp, "create service")
 	}
 
 	var result SingleResponse[ApplicationService]
@@ -652,4 +711,252 @@ func (c *Client) DeleteWorker(applicationID, workerID int64) error {
 	}
 
 	return nil
+}
+
+// logRequest logs API request details with sanitized sensitive information
+func (c *Client) logRequest(method, url, requestBody string, statusCode int, responseBody, errorMsg string, duration time.Duration) {
+	if !c.logger.enabled {
+		return
+	}
+
+	// Create log entry for structured logging (can be used for external log systems)
+	_ = LogEntry{
+		Timestamp:    time.Now(),
+		Method:       method,
+		URL:          c.sanitizeURL(url),
+		RequestBody:  requestBody,
+		StatusCode:   statusCode,
+		ResponseBody: responseBody,
+		Error:        errorMsg,
+		Duration:     duration,
+	}
+
+	if c.logger.debug {
+		// Detailed logging for debug mode
+		log.Printf("[DEBUG] Ploi API Request: %s %s", method, c.sanitizeURL(url))
+		if requestBody != "" {
+			log.Printf("[DEBUG] Request Body: %s", requestBody)
+		}
+		if statusCode > 0 {
+			log.Printf("[DEBUG] Response Status: %d", statusCode)
+			if responseBody != "" {
+				log.Printf("[DEBUG] Response Body: %s", responseBody)
+			}
+		}
+		if errorMsg != "" {
+			log.Printf("[DEBUG] Error: %s", errorMsg)
+		}
+		log.Printf("[DEBUG] Duration: %v", duration)
+	} else {
+		// Compact logging for normal mode
+		if errorMsg != "" {
+			log.Printf("[ERROR] Ploi API %s %s failed: %s (took %v)", method, c.sanitizeURL(url), errorMsg, duration)
+		} else {
+			log.Printf("[INFO] Ploi API %s %s: %d (took %v)", method, c.sanitizeURL(url), statusCode, duration)
+		}
+	}
+}
+
+// sanitizeToken masks API token for logging
+func (c *Client) sanitizeToken(token string) string {
+	if len(token) <= 8 {
+		return "***"
+	}
+	return token[:4] + "***" + token[len(token)-4:]
+}
+
+// sanitizeURL removes sensitive information from URL for logging
+func (c *Client) sanitizeURL(url string) string {
+	// Remove any potential sensitive information from query parameters
+	if strings.Contains(url, "?") {
+		parts := strings.Split(url, "?")
+		return parts[0] + "?[params sanitized]"
+	}
+	return url
+}
+
+// sanitizeBody sanitizes request/response body for logging
+func (c *Client) sanitizeBody(body string) string {
+	// For now, just return the body as-is since we're not storing actual secrets in service configs
+	// In the future, we could add more sophisticated sanitization
+	return body
+}
+
+// handleErrorResponse processes error responses and returns detailed error information
+func (c *Client) handleErrorResponse(resp *http.Response, operation string) error {
+	var errResp ErrorResponse
+	if err := json.NewDecoder(resp.Body).Decode(&errResp); err != nil {
+		return fmt.Errorf("failed to %s: %s", operation, resp.Status)
+	}
+
+	detailedErr := &DetailedError{
+		StatusCode: resp.StatusCode,
+		Message:    errResp.Message,
+		DocsLink:   "https://docs.ploi.io/cloud",
+	}
+
+	// Convert error map to detailed format
+	if len(errResp.Errors) > 0 {
+		detailedErr.Errors = make(map[string][]string)
+		for field, value := range errResp.Errors {
+			switch v := value.(type) {
+			case string:
+				detailedErr.Errors[field] = []string{v}
+			case []interface{}:
+				messages := make([]string, len(v))
+				for i, msg := range v {
+					if str, ok := msg.(string); ok {
+						messages[i] = str
+					} else {
+						messages[i] = fmt.Sprintf("%v", msg)
+					}
+				}
+				detailedErr.Errors[field] = messages
+			case []string:
+				detailedErr.Errors[field] = v
+			default:
+				detailedErr.Errors[field] = []string{fmt.Sprintf("%v", v)}
+			}
+		}
+	}
+
+	// Add specific suggestions based on status code
+	switch resp.StatusCode {
+	case 422:
+		detailedErr.Suggestion = c.generateValidationSuggestion(operation, detailedErr.Errors)
+	case 404:
+		detailedErr.Suggestion = "Check that the resource exists and the ID is correct"
+	case 401:
+		detailedErr.Suggestion = "Check that your API token is valid and has the required permissions"
+	case 403:
+		detailedErr.Suggestion = "Check that your API token has permission to perform this operation"
+	case 500, 502, 503, 504:
+		detailedErr.Suggestion = "This appears to be a server error. Please try again in a few moments"
+	}
+
+	return fmt.Errorf("failed to %s: %s\nSuggestion: %s\nDocumentation: %s",
+		operation, detailedErr.Message, detailedErr.Suggestion, detailedErr.DocsLink)
+}
+
+// generateValidationSuggestion provides helpful suggestions for validation errors
+func (c *Client) generateValidationSuggestion(operation string, errors map[string][]string) string {
+	if len(errors) == 0 {
+		return "Check the API documentation for required fields and valid values"
+	}
+
+	suggestions := []string{}
+	
+	for field, messages := range errors {
+		switch field {
+		case "type":
+			suggestions = append(suggestions, "Service type must be one of: mysql, postgresql, redis, valkey, rabbitmq, mongodb, minio, sftp")
+		case "version":
+			suggestions = append(suggestions, "Check that the version is supported for the selected service type")
+		case "storage_size":
+			suggestions = append(suggestions, "Storage size must be specified with units (e.g., '1Gi', '10Gi')")
+		case "memory_request":
+			suggestions = append(suggestions, "Memory request must be specified with units (e.g., '256Mi', '1Gi')")
+		case "cpu_request":
+			suggestions = append(suggestions, "CPU request must be specified correctly (e.g., '250m', '1', '2')")
+		default:
+			suggestions = append(suggestions, fmt.Sprintf("Field '%s': %s", field, strings.Join(messages, ", ")))
+		}
+	}
+
+	if len(suggestions) > 0 {
+		return strings.Join(suggestions, "; ")
+	}
+
+	return "Check the API documentation for required fields and valid values"
+}
+
+// ValidateServiceRequest validates service configuration before API request
+func (c *Client) ValidateServiceRequest(service *ApplicationService) error {
+	if service == nil {
+		return fmt.Errorf("service cannot be nil")
+	}
+
+	if service.ApplicationID <= 0 {
+		return fmt.Errorf("application_id must be greater than 0")
+	}
+
+	if service.Type == "" {
+		return fmt.Errorf("service type is required")
+	}
+
+	// Validate service type
+	validTypes := map[string]bool{
+		"mysql":      true,
+		"postgresql": true,
+		"redis":      true,
+		"valkey":     true,
+		"rabbitmq":   true,
+		"mongodb":    true,
+		"minio":      true,
+		"sftp":       true,
+		"worker":     true,
+	}
+
+	if !validTypes[service.Type] {
+		return fmt.Errorf("invalid service type '%s'. Must be one of: mysql, postgresql, redis, valkey, rabbitmq, mongodb, minio, sftp, worker", service.Type)
+	}
+
+	// Validate that worker services have a command
+	if service.Type == "worker" && service.Command == "" {
+		return fmt.Errorf("command is required for worker type services")
+	}
+
+	// Validate resource specifications if provided
+	if service.MemoryRequest != "" && !isValidResourceSpec(service.MemoryRequest, []string{"Mi", "Gi"}) {
+		return fmt.Errorf("invalid memory_request format '%s'. Use format like '256Mi' or '1Gi'", service.MemoryRequest)
+	}
+
+	if service.CPURequest != "" && !isValidCPUSpec(service.CPURequest) {
+		return fmt.Errorf("invalid cpu_request format '%s'. Use format like '250m', '1', or '2'", service.CPURequest)
+	}
+
+	if service.StorageSize != "" && !isValidResourceSpec(service.StorageSize, []string{"Mi", "Gi", "Ti"}) {
+		return fmt.Errorf("invalid storage_size format '%s'. Use format like '1Gi' or '10Gi'", service.StorageSize)
+	}
+
+	return nil
+}
+
+// isValidResourceSpec validates Kubernetes resource specification format
+func isValidResourceSpec(spec string, validUnits []string) bool {
+	if spec == "" {
+		return false
+	}
+
+	for _, unit := range validUnits {
+		if strings.HasSuffix(spec, unit) {
+			numberPart := strings.TrimSuffix(spec, unit)
+			if _, err := strconv.ParseFloat(numberPart, 64); err == nil {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// isValidCPUSpec validates CPU specification format
+func isValidCPUSpec(spec string) bool {
+	if spec == "" {
+		return false
+	}
+
+	// Check for millicores (e.g., "250m")
+	if strings.HasSuffix(spec, "m") {
+		numberPart := strings.TrimSuffix(spec, "m")
+		if _, err := strconv.ParseInt(numberPart, 10, 64); err == nil {
+			return true
+		}
+	}
+
+	// Check for whole cores (e.g., "1", "2")
+	if _, err := strconv.ParseFloat(spec, 64); err == nil {
+		return true
+	}
+
+	return false
 }

@@ -40,6 +40,7 @@ type ApplicationResourceModel struct {
 	Settings           *SettingsModel `tfsdk:"settings"`
 	PHPExtensions      types.List     `tfsdk:"php_extensions"`
 	PHPSettings        types.List     `tfsdk:"php_settings"`
+	AdditionalDomains  types.List     `tfsdk:"additional_domains"`
 	URL                types.String   `tfsdk:"url"`
 	Status             types.String   `tfsdk:"status"`
 	NeedsDeployment    types.Bool     `tfsdk:"needs_deployment"`
@@ -117,6 +118,11 @@ func (r *ApplicationResource) Schema(ctx context.Context, req resource.SchemaReq
 				Optional:            true,
 				ElementType:         types.StringType,
 				MarkdownDescription: "PHP ini settings",
+			},
+			"additional_domains": schema.ListAttribute{
+				Optional:            true,
+				ElementType:         types.StringType,
+				MarkdownDescription: "List of additional custom domains to sync with the application",
 			},
 			"url": schema.StringAttribute{
 				Computed:            true,
@@ -268,7 +274,7 @@ func (r *ApplicationResource) Create(ctx context.Context, req resource.CreateReq
 	if created.NeedsDeployment {
 		err := r.client.DeployApplication(created.ID)
 		if err != nil {
-			resp.Diagnostics.AddError("Deploy Error", fmt.Sprintf("Application created but deployment failed: %s", err))
+			resp.Diagnostics.AddWarning("Deploy Warning", fmt.Sprintf("Application created successfully, but deployment initiation had an issue: %s", err))
 			// Don't return here - the application was created successfully, just deployment failed
 		}
 		
@@ -335,7 +341,7 @@ func (r *ApplicationResource) Update(ctx context.Context, req resource.UpdateReq
 	if updated.NeedsDeployment {
 		err := r.client.DeployApplication(updated.ID)
 		if err != nil {
-			resp.Diagnostics.AddError("Deploy Error", fmt.Sprintf("Application updated but deployment failed: %s", err))
+			resp.Diagnostics.AddWarning("Deploy Warning", fmt.Sprintf("Application updated successfully, but deployment initiation had an issue: %s", err))
 			// Don't return here - the application was updated successfully, just deployment failed
 		}
 		
@@ -459,13 +465,28 @@ func (r *ApplicationResource) toAPIModel(data *ApplicationResourceModel) *client
 		}
 	}
 
+	if !data.AdditionalDomains.IsNull() {
+		elements := make([]types.String, 0, len(data.AdditionalDomains.Elements()))
+		data.AdditionalDomains.ElementsAs(context.Background(), &elements, false)
+		for _, elem := range elements {
+			app.Domains = append(app.Domains, client.ApplicationDomain{
+				Domain: elem.ValueString(),
+			})
+		}
+	}
+
 	return app
 }
 
 func (r *ApplicationResource) toUpdateAPIModel(data *ApplicationResourceModel) map[string]interface{} {
 	update := make(map[string]interface{})
 
-	// Only include fields that can be updated and are not null/empty
+	// Add start_command to updates - this was the missing field causing consistency errors
+	if !data.StartCommand.IsNull() && data.StartCommand.ValueString() != "" {
+		update["start_command"] = data.StartCommand.ValueString()
+	}
+
+	// Runtime fields - ensure all are included
 	if data.Runtime != nil {
 		if !data.Runtime.NodeJSVersion.IsNull() && data.Runtime.NodeJSVersion.ValueString() != "" {
 			update["nodejs_version"] = data.Runtime.NodeJSVersion.ValueString()
@@ -475,8 +496,9 @@ func (r *ApplicationResource) toUpdateAPIModel(data *ApplicationResourceModel) m
 		}
 	}
 
+	// Settings fields - ensure all are properly included
 	if data.Settings != nil {
-		if !data.Settings.HealthCheckPath.IsNull() && data.Settings.HealthCheckPath.ValueString() != "" {
+		if !data.Settings.HealthCheckPath.IsNull() {
 			update["health_check_path"] = data.Settings.HealthCheckPath.ValueString()
 		}
 		if !data.Settings.SchedulerEnabled.IsNull() {
@@ -485,14 +507,15 @@ func (r *ApplicationResource) toUpdateAPIModel(data *ApplicationResourceModel) m
 		if !data.Settings.Replicas.IsNull() {
 			update["replicas"] = data.Settings.Replicas.ValueInt64()
 		}
-		if !data.Settings.CPURequest.IsNull() && data.Settings.CPURequest.ValueString() != "" {
+		if !data.Settings.CPURequest.IsNull() {
 			update["cpu_request"] = data.Settings.CPURequest.ValueString()
 		}
-		if !data.Settings.MemoryRequest.IsNull() && data.Settings.MemoryRequest.ValueString() != "" {
+		if !data.Settings.MemoryRequest.IsNull() {
 			update["memory_request"] = data.Settings.MemoryRequest.ValueString()
 		}
 	}
 
+	// Build and init commands
 	if !data.BuildCommands.IsNull() {
 		elements := make([]types.String, 0, len(data.BuildCommands.Elements()))
 		data.BuildCommands.ElementsAs(context.Background(), &elements, false)
@@ -515,6 +538,53 @@ func (r *ApplicationResource) toUpdateAPIModel(data *ApplicationResourceModel) m
 		if len(commands) > 0 {
 			update["init_commands"] = commands
 		}
+	}
+
+	// PHP configuration fields
+	if !data.PHPExtensions.IsNull() {
+		elements := make([]types.String, 0, len(data.PHPExtensions.Elements()))
+		data.PHPExtensions.ElementsAs(context.Background(), &elements, false)
+		var extensions []string
+		for _, elem := range elements {
+			extensions = append(extensions, elem.ValueString())
+		}
+		if len(extensions) > 0 {
+			update["php_extensions"] = extensions
+		}
+	}
+
+	if !data.PHPSettings.IsNull() {
+		elements := make([]types.String, 0, len(data.PHPSettings.Elements()))
+		data.PHPSettings.ElementsAs(context.Background(), &elements, false)
+		var settings []string
+		for _, elem := range elements {
+			settings = append(settings, elem.ValueString())
+		}
+		if len(settings) > 0 {
+			update["php_settings"] = settings
+		}
+	}
+
+	// Additional domains
+	if !data.AdditionalDomains.IsNull() {
+		elements := make([]types.String, 0, len(data.AdditionalDomains.Elements()))
+		data.AdditionalDomains.ElementsAs(context.Background(), &elements, false)
+		var domains []string
+		for _, elem := range elements {
+			domains = append(domains, elem.ValueString())
+		}
+		if len(domains) > 0 {
+			update["additional_domains"] = domains
+		}
+	}
+
+	// Basic application fields that might need updating
+	if !data.Name.IsNull() {
+		update["name"] = data.Name.ValueString()
+	}
+
+	if !data.CustomManifests.IsNull() {
+		update["custom_manifests"] = data.CustomManifests.ValueString()
 	}
 
 	return update
@@ -567,19 +637,25 @@ func (r *ApplicationResource) fromAPIModel(app *client.Application, data *Applic
 		data.Runtime = &RuntimeModel{}
 	}
 	
-	// Only set version fields for the appropriate app type to avoid conflicts
+	// Handle version fields properly for each app type
 	if app.Type == "php" || app.Type == "laravel" {
-		// For PHP/Laravel apps, only set PHP version
-		if app.PHPVersion != "" || !data.Runtime.PHPVersion.IsNull() {
+		// For PHP/Laravel apps, handle PHP version
+		if app.PHPVersion != "" {
 			data.Runtime.PHPVersion = types.StringValue(app.PHPVersion)
+		} else if data.Runtime.PHPVersion.IsNull() {
+			data.Runtime.PHPVersion = types.StringNull()
 		}
 		// Clear nodejs_version for PHP apps to avoid conflicts
 		data.Runtime.NodeJSVersion = types.StringNull()
 	} else if app.Type == "nodejs" {
-		// For Node.js apps, only set Node.js version
-		if app.NodeJSVersion != "" || !data.Runtime.NodeJSVersion.IsNull() {
+		// For Node.js apps, handle Node.js version with better preservation
+		if app.NodeJSVersion != "" {
 			data.Runtime.NodeJSVersion = types.StringValue(app.NodeJSVersion)
+		} else if data.Runtime.NodeJSVersion.IsNull() {
+			// If API returns empty but we have a planned value, preserve it
+			data.Runtime.NodeJSVersion = types.StringNull()
 		}
+		// Preserve planned nodejs_version if API doesn't return it consistently
 		// Clear php_version for Node.js apps to avoid conflicts
 		data.Runtime.PHPVersion = types.StringNull()
 	}
@@ -587,53 +663,98 @@ func (r *ApplicationResource) fromAPIModel(app *client.Application, data *Applic
 	if data.Settings == nil {
 		data.Settings = &SettingsModel{}
 	}
-	// Preserve the planned settings if API returns empty strings or zeros
+	
+	// Settings with better value preservation logic
 	if app.HealthCheckPath != "" {
 		data.Settings.HealthCheckPath = types.StringValue(app.HealthCheckPath)
+	} else if data.Settings.HealthCheckPath.IsNull() {
+		data.Settings.HealthCheckPath = types.StringNull()
 	}
+	
+	// Always update scheduler_enabled from API as it's a boolean
 	data.Settings.SchedulerEnabled = types.BoolValue(app.SchedulerEnabled)
+	
 	if app.Replicas != 0 {
 		data.Settings.Replicas = types.Int64Value(app.Replicas)
+	} else if data.Settings.Replicas.IsNull() {
+		data.Settings.Replicas = types.Int64Null()
 	}
+	
 	if app.CPURequest != "" {
 		data.Settings.CPURequest = types.StringValue(app.CPURequest)
+	} else if data.Settings.CPURequest.IsNull() {
+		data.Settings.CPURequest = types.StringNull()
 	}
+	
+	// Memory request - handle potential API/provider value mismatches
 	if app.MemoryRequest != "" {
 		data.Settings.MemoryRequest = types.StringValue(app.MemoryRequest)
+	} else if data.Settings.MemoryRequest.IsNull() {
+		data.Settings.MemoryRequest = types.StringNull()
 	}
+	// Note: If there's a persistent mismatch (e.g., API returns "1Gi" but we planned "512Mi"),
+	// the API value takes precedence to reflect the actual state
 
+	// Handle build commands - preserve if API returns empty array
 	if len(app.BuildCommands) > 0 {
 		elements := make([]types.String, len(app.BuildCommands))
 		for i, cmd := range app.BuildCommands {
 			elements[i] = types.StringValue(cmd)
 		}
 		data.BuildCommands, _ = types.ListValueFrom(context.Background(), types.StringType, elements)
+	} else if data.BuildCommands.IsNull() {
+		data.BuildCommands = types.ListNull(types.StringType)
 	}
 
+	// Handle init commands - preserve if API returns empty array
 	if len(app.InitCommands) > 0 {
 		elements := make([]types.String, len(app.InitCommands))
 		for i, cmd := range app.InitCommands {
 			elements[i] = types.StringValue(cmd)
 		}
 		data.InitCommands, _ = types.ListValueFrom(context.Background(), types.StringType, elements)
+	} else if data.InitCommands.IsNull() {
+		data.InitCommands = types.ListNull(types.StringType)
 	}
 	
-	// Handle StartCommand field - always convert API response to StringValue
-	data.StartCommand = types.StringValue(app.StartCommand)
+	// Handle StartCommand - preserve planned value if API returns empty
+	if app.StartCommand != "" {
+		data.StartCommand = types.StringValue(app.StartCommand)
+	} else if data.StartCommand.IsNull() {
+		data.StartCommand = types.StringNull()
+	}
+	// If planned value exists and API returns empty, keep the planned value
 
+	// Handle PHP extensions - preserve if API returns empty array
 	if len(app.PHPExtensions) > 0 {
 		elements := make([]types.String, len(app.PHPExtensions))
 		for i, ext := range app.PHPExtensions {
 			elements[i] = types.StringValue(ext)
 		}
 		data.PHPExtensions, _ = types.ListValueFrom(context.Background(), types.StringType, elements)
+	} else if data.PHPExtensions.IsNull() {
+		data.PHPExtensions = types.ListNull(types.StringType)
 	}
 
+	// Handle PHP settings - preserve if API returns empty array
 	if len(app.PHPSettings) > 0 {
 		elements := make([]types.String, len(app.PHPSettings))
 		for i, setting := range app.PHPSettings {
 			elements[i] = types.StringValue(setting)
 		}
 		data.PHPSettings, _ = types.ListValueFrom(context.Background(), types.StringType, elements)
+	} else if data.PHPSettings.IsNull() {
+		data.PHPSettings = types.ListNull(types.StringType)
+	}
+
+	// Handle additional domains - preserve if API returns empty array
+	if len(app.Domains) > 0 {
+		elements := make([]types.String, len(app.Domains))
+		for i, domain := range app.Domains {
+			elements[i] = types.StringValue(domain.Domain)
+		}
+		data.AdditionalDomains, _ = types.ListValueFrom(context.Background(), types.StringType, elements)
+	} else if data.AdditionalDomains.IsNull() {
+		data.AdditionalDomains = types.ListNull(types.StringType)
 	}
 }

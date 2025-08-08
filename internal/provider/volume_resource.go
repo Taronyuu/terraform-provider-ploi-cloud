@@ -40,7 +40,7 @@ func (r *VolumeResource) Metadata(ctx context.Context, req resource.MetadataRequ
 
 func (r *VolumeResource) Schema(ctx context.Context, req resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		MarkdownDescription: "Manages a persistent volume for a Ploi Cloud application",
+		MarkdownDescription: "Manages a persistent volume for a Ploi Cloud application.\n\n**Note**: Volume creation is not supported via the API. Volumes are automatically created when you create services that require persistent storage (e.g., MySQL, PostgreSQL, MongoDB). Use this resource to import and manage existing volumes.\n\n## Usage\n\nThis resource is **import-only** and **read-only** for creation. To create volumes, use services that require storage:\n\n```hcl\nresource \"ploicloud_service\" \"database\" {\n  application_id = ploicloud_application.app.id\n  type           = \"mysql\"\n  storage_size   = \"10Gi\"  # This creates a volume automatically\n}\n\n# Import the automatically created volume\nresource \"ploicloud_volume\" \"db_storage\" {\n  # terraform import ploicloud_volume.db_storage application_id.volume_id\n}\n```\n\nYou can resize existing volumes by updating the `size` attribute.",
 
 		Attributes: map[string]schema.Attribute{
 			"id": schema.Int64Attribute{
@@ -101,17 +101,21 @@ func (r *VolumeResource) Create(ctx context.Context, req resource.CreateRequest,
 		return
 	}
 
-	volume := r.toAPIModel(&data)
-
-	created, err := r.client.CreateVolume(volume)
-	if err != nil {
-		resp.Diagnostics.AddError("Client Error", fmt.Sprintf("Unable to create volume, got error: %s", err))
-		return
-	}
-
-	r.fromAPIModel(created, &data)
-
-	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
+	// Prevent creation of new volumes and provide guidance
+	resp.Diagnostics.AddError(
+		"Volume Creation Not Supported",
+		"Direct volume creation is not supported by the Ploi Cloud API. Volumes are automatically created when you create services that require persistent storage.\n\n"+
+			"To create a volume, use a service resource that requires storage:\n\n"+
+			"resource \"ploicloud_service\" \"database\" {\n"+
+			"  application_id = ploicloud_application.app.id\n"+
+			"  type           = \"mysql\"\n"+
+			"  storage_size   = \"10Gi\"  # This creates a volume automatically\n"+
+			"}\n\n"+
+			"Then import the created volume:\n\n"+
+			"terraform import ploicloud_volume.example application_id.volume_id\n\n"+
+			"Supported storage services: mysql, postgresql, mongodb, minio, rabbitmq\n"+
+			"Documentation: https://docs.ploi.io/cloud/volumes",
+	)
 }
 
 func (r *VolumeResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
