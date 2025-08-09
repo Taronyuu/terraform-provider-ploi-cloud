@@ -10,6 +10,8 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/ploi/terraform-provider-ploicloud/internal/client"
@@ -34,7 +36,6 @@ type ServiceResourceModel struct {
 	Version       types.String `tfsdk:"version"`
 	Settings      types.Map    `tfsdk:"settings"`
 	Replicas      types.Int64  `tfsdk:"replicas"`
-	CPURequest    types.String `tfsdk:"cpu_request"`
 	MemoryRequest types.String `tfsdk:"memory_request"`
 	StorageSize   types.String `tfsdk:"storage_size"`
 	Extensions    types.List   `tfsdk:"extensions"`
@@ -63,6 +64,9 @@ func (r *ServiceResource) Schema(ctx context.Context, req resource.SchemaRequest
 				Optional:            true,
 				Computed:            true,
 				MarkdownDescription: "Service name (auto-generated if not provided)",
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.RequiresReplace(),
+				},
 			},
 			"type": schema.StringAttribute{
 				Required:            true,
@@ -85,11 +89,6 @@ func (r *ServiceResource) Schema(ctx context.Context, req resource.SchemaRequest
 				Optional:            true,
 				Computed:            true,
 				MarkdownDescription: "Number of replicas for the service (applicable to worker-type services)",
-			},
-			"cpu_request": schema.StringAttribute{
-				Optional:            true,
-				Computed:            true,
-				MarkdownDescription: "CPU request for the service (e.g., '250m', '1')",
 			},
 			"memory_request": schema.StringAttribute{
 				Optional:            true,
@@ -269,24 +268,31 @@ func (r *ServiceResource) toAPIModel(data *ServiceResourceModel) *client.Applica
 		service.Name = data.Name.ValueString()
 	}
 
-	// Include settings if provided in configuration
+	// Initialize settings map
+	settingsMap := make(map[string]string)
+	
+	// Include existing settings if provided in configuration
 	if !data.Settings.IsNull() {
-		settingsMap := make(map[string]string)
 		data.Settings.ElementsAs(context.Background(), &settingsMap, false)
-		service.Settings = client.FlexibleSettingsFromMap(settingsMap)
 	}
 
-	// Include resource configuration if provided
+	// Add resource configuration to settings (API expects these in settings object)
+	if !data.MemoryRequest.IsNull() && data.MemoryRequest.ValueString() != "" {
+		settingsMap["memory_request"] = data.MemoryRequest.ValueString()
+		service.MemoryRequest = data.MemoryRequest.ValueString() // Also set on direct field
+	}
+	
+	// For worker services, add command to settings as well
+	if service.Type == "worker" && !data.Command.IsNull() && data.Command.ValueString() != "" {
+		settingsMap["command"] = data.Command.ValueString()
+	}
+
+	// Set the settings object
+	service.Settings = client.FlexibleSettingsFromMap(settingsMap)
+
+	// Include resource configuration for non-settings fields
 	if !data.Replicas.IsNull() {
 		service.Replicas = data.Replicas.ValueInt64()
-	}
-	
-	if !data.CPURequest.IsNull() && data.CPURequest.ValueString() != "" {
-		service.CPURequest = data.CPURequest.ValueString()
-	}
-	
-	if !data.MemoryRequest.IsNull() && data.MemoryRequest.ValueString() != "" {
-		service.MemoryRequest = data.MemoryRequest.ValueString()
 	}
 	
 	if !data.StorageSize.IsNull() && data.StorageSize.ValueString() != "" {
@@ -321,13 +327,67 @@ func (r *ServiceResource) fromAPIModel(service *client.ApplicationService, data 
 	}
 	data.Status = types.StringValue(service.Status)
 
-	// Set resource configuration
-	data.Replicas = types.Int64Value(service.Replicas)
-	data.CPURequest = types.StringValue(service.CPURequest)
-	data.MemoryRequest = types.StringValue(service.MemoryRequest)
-	data.StorageSize = types.StringValue(service.StorageSize)
+	// Set resource configuration - handle API limitations properly
+	// Note: The API may not return certain fields for all service types
+	
+	// Replicas: Only meaningful for worker services, API may return 0
+	if service.Replicas > 0 {
+		data.Replicas = types.Int64Value(service.Replicas)
+	} else {
+		// For worker services, keep planned value if it exists
+		if data.Type.ValueString() == "worker" && !data.Replicas.IsNull() && !data.Replicas.IsUnknown() {
+			// Keep the planned/configured value for workers
+		} else {
+			data.Replicas = types.Int64Value(service.Replicas)
+		}
+	}
+	
+	// StorageSize: API may not return this for all service types
+	if service.StorageSize != "" {
+		data.StorageSize = types.StringValue(service.StorageSize)
+	} else {
+		// Keep planned value for database/cache services that should have storage
+		serviceType := data.Type.ValueString()
+		if (serviceType == "postgresql" || serviceType == "mysql" || serviceType == "redis" || serviceType == "minio") && 
+		   !data.StorageSize.IsNull() && !data.StorageSize.IsUnknown() {
+			// Keep the planned/configured storage size
+		} else {
+			data.StorageSize = types.StringNull()
+		}
+	}
+	
+	// Extract CPU and memory requests from settings if available
+	if len(service.Settings) > 0 {
+		settingsMap := service.Settings.ToMap()
+		
+		// Memory request: Check settings first, then direct field, then preserve planned value
+		if memoryRequest, ok := settingsMap["memory_request"]; ok && memoryRequest != "" {
+			data.MemoryRequest = types.StringValue(memoryRequest)
+		} else if service.MemoryRequest != "" {
+			data.MemoryRequest = types.StringValue(service.MemoryRequest)
+		} else {
+			// Keep planned value for services that should have memory_request
+			if !data.MemoryRequest.IsNull() && !data.MemoryRequest.IsUnknown() {
+				// Keep the planned/configured value
+			} else {
+				data.MemoryRequest = types.StringNull()
+			}
+		}
+	} else {
+		// Fallback to direct fields if settings are empty
+		if service.MemoryRequest != "" {
+			data.MemoryRequest = types.StringValue(service.MemoryRequest)
+		} else {
+			// Keep planned value if it exists
+			if !data.MemoryRequest.IsNull() && !data.MemoryRequest.IsUnknown() {
+				// Keep the planned/configured value
+			} else {
+				data.MemoryRequest = types.StringNull()
+			}
+		}
+	}
 
-	// Handle extensions list
+	// Handle extensions list - only for PostgreSQL services
 	if len(service.Extensions) > 0 {
 		extensions := make([]types.String, len(service.Extensions))
 		for i, ext := range service.Extensions {
@@ -335,14 +395,22 @@ func (r *ServiceResource) fromAPIModel(service *client.ApplicationService, data 
 		}
 		data.Extensions, _ = types.ListValueFrom(context.Background(), types.StringType, extensions)
 	} else {
-		data.Extensions = types.ListNull(types.StringType)
+		// Keep planned extensions for PostgreSQL services
+		if data.Type.ValueString() == "postgresql" && !data.Extensions.IsNull() && !data.Extensions.IsUnknown() {
+			// Keep the planned/configured extensions
+		} else {
+			data.Extensions = types.ListNull(types.StringType)
+		}
 	}
 
 	// Handle command field
 	if service.Command != "" {
 		data.Command = types.StringValue(service.Command)
 	} else {
-		data.Command = types.StringNull()
+		// Preserve existing planned value if API returns empty
+		if data.Command.IsNull() {
+			data.Command = types.StringNull()
+		}
 	}
 
 	if len(service.Settings) > 0 {

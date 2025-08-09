@@ -901,9 +901,18 @@ func (c *Client) ValidateServiceRequest(service *ApplicationService) error {
 		return fmt.Errorf("invalid service type '%s'. Must be one of: mysql, postgresql, redis, valkey, rabbitmq, mongodb, minio, sftp, worker", service.Type)
 	}
 
-	// Validate that worker services have a command
-	if service.Type == "worker" && service.Command == "" {
-		return fmt.Errorf("command is required for worker type services")
+	// Validate that worker services have a command (either direct field or in settings)
+	if service.Type == "worker" {
+		hasCommand := service.Command != ""
+		if !hasCommand && len(service.Settings) > 0 {
+			settingsMap := service.Settings.ToMap()
+			if cmd, ok := settingsMap["command"]; ok && cmd != "" {
+				hasCommand = true
+			}
+		}
+		if !hasCommand {
+			return fmt.Errorf("command is required for worker type services")
+		}
 	}
 
 	// Validate resource specifications if provided

@@ -36,6 +36,13 @@ resource "ploicloud_application" "api" {
   type                = "laravel"
   application_version = "11.x"
   
+  start_command = "php artisan serve --host=0.0.0.0 --port=8000"
+  
+  additional_domains = [
+    "api.example.com",
+    "www.api.example.com"
+  ]
+  
   runtime {
     php_version    = "8.4"
     nodejs_version = "22"
@@ -45,7 +52,6 @@ resource "ploicloud_application" "api" {
     health_check_path  = "/api/health"
     scheduler_enabled  = true
     replicas          = 3
-    cpu_request       = "1"
     memory_request    = "2Gi"
   }
   
@@ -83,9 +89,10 @@ resource "ploicloud_application" "blog" {
 - `application_version` (String) - Application version (e.g., 11.x for Laravel)
 - `build_commands` (List of String) - Build commands to run during image build
 - `init_commands` (List of String) - Initialization commands to run before starting the application
+- `start_command` (String) - Custom command to start the application
+- `additional_domains` (List of String) - Additional custom domains for the application
 - `php_extensions` (List of String) - PHP extensions to install
 - `php_settings` (List of String) - PHP ini settings
-- `custom_manifests` (String) - Custom Kubernetes manifests in YAML format
 - `repository_url` (String) - Repository URL
 - `repository_owner` (String) - Repository owner
 - `repository_name` (String) - Repository name
@@ -104,7 +111,6 @@ resource "ploicloud_application" "blog" {
 - `health_check_path` (String) - Health check path. Defaults to `/`
 - `scheduler_enabled` (Boolean) - Enable Laravel scheduler. Defaults to `false`
 - `replicas` (Number) - Number of replicas. Defaults to `1`
-- `cpu_request` (String) - CPU request. Defaults to `250m`
 - `memory_request` (String) - Memory request. Defaults to `512Mi`
 
 ### Read-Only

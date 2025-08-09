@@ -64,6 +64,13 @@ resource "ploicloud_application" "api" {
     nodejs_version = "22"
   }
   
+  start_command = "php artisan serve --host=0.0.0.0 --port=8000"
+  
+  additional_domains = [
+    "api.example.com",
+    "www.api.example.com"
+  ]
+  
   settings {
     replicas          = 3
     scheduler_enabled = true
@@ -75,9 +82,10 @@ resource "ploicloud_service" "db" {
   application_id = ploicloud_application.api.id
   type          = "mysql"
   version       = "8.0"
+  storage_size  = "20Gi"
+  memory_request = "2Gi"
   settings = {
     database = "production"
-    size     = "20Gi"
   }
 }
 
@@ -86,8 +94,11 @@ resource "ploicloud_service" "queue" {
   application_id = ploicloud_application.api.id
   service_name   = "default-queue"
   type          = "worker"
-  command       = "php artisan queue:work"
   replicas      = 2
+  memory_request = "1Gi"
+  settings = {
+    command = "php artisan queue:work"
+  }
 }
 ```
 
@@ -122,7 +133,9 @@ resource "ploicloud_service" "queue" {
 
 **✅ Previous Features (v1.1.0):**
 - `start_command` - Custom application start commands
+- `additional_domains` - Multiple custom domains per application
 - `storage_size` - Storage allocation for databases and caches
+- `memory_request` - Memory allocation for services
 - `extensions` - PostgreSQL extensions support
 - Enhanced worker resource specifications
 
@@ -185,8 +198,11 @@ resource "ploicloud_service" "queue" {
   application_id = ploicloud_application.app.id
   service_name   = "queue-worker"
   type          = "worker"
-  command       = "php artisan queue:work"
   replicas      = 2
+  memory_request = "1Gi"
+  settings = {
+    command = "php artisan queue:work"
+  }
 }
 ```
 
@@ -202,7 +218,8 @@ resource "ploicloud_volume" "uploads" {
 resource "ploicloud_service" "database" {
   application_id = ploicloud_application.app.id
   type          = "mysql"
-  storage_size  = "10Gi"  # Volume created automatically
+  storage_size   = "10Gi"  # Volume created automatically
+  memory_request = "2Gi"   # Memory allocation
 }
 ```
 
